@@ -1,0 +1,156 @@
+{
+  "name": "vscodemodelswitch",
+  "displayName": "VSCodeModelSwitch",
+  "description": "AI CLI provider switcher for Claude Code and Codex in VSCode.",
+  "version": "0.1.0",
+  "publisher": "xinzhaodc",
+  "icon": "media/switch_889728.png",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/XinZhaoDC/VSModelSwitch.git"
+  },
+  "bugs": {
+    "url": "https://github.com/XinZhaoDC/VSModelSwitch/issues"
+  },
+  "homepage": "https://github.com/XinZhaoDC/VSModelSwitch#readme",
+  "keywords": [
+    "vscode",
+    "claude-code",
+    "codex",
+    "ai-cli",
+    "provider-switcher",
+    "model-switcher"
+  ],
+  "engines": {
+    "vscode": "^1.96.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onView:vscodemodelswitch.providerView",
+    "onCommand:vscodemodelswitch.openMenu",
+    "onCommand:vscodemodelswitch.addProvider",
+    "onCommand:vscodemodelswitch.switchProvider",
+    "onCommand:vscodemodelswitch.refreshModels",
+    "onCommand:vscodemodelswitch.openClaudeTerminal",
+    "onCommand:vscodemodelswitch.openCodexTerminal",
+    "onCommand:vscodemodelswitch.viewClaudeConfig",
+    "onCommand:vscodemodelswitch.viewCodexConfig",
+    "onCommand:vscodemodelswitch.exportPublicConfig",
+    "onCommand:vscodemodelswitch.importPublicConfig",
+    "onCommand:vscodemodelswitch.applyCurrentProvider"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "vscodemodelswitch",
+          "title": "VSCodeModelSwitch",
+          "icon": "media/activity-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "vscodemodelswitch": [
+        {
+          "id": "vscodemodelswitch.providerView",
+          "name": "Providers",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "vscodemodelswitch.openMenu",
+        "title": "VSCodeModelSwitch: Open Menu"
+      },
+      {
+        "command": "vscodemodelswitch.addProvider",
+        "title": "VSCodeModelSwitch: Add Provider"
+      },
+      {
+        "command": "vscodemodelswitch.switchProvider",
+        "title": "VSCodeModelSwitch: Switch Provider"
+      },
+      {
+        "command": "vscodemodelswitch.refreshModels",
+        "title": "VSCodeModelSwitch: Refresh Models"
+      },
+      {
+        "command": "vscodemodelswitch.openClaudeTerminal",
+        "title": "VSCodeModelSwitch: Open Claude Terminal"
+      },
+      {
+        "command": "vscodemodelswitch.openCodexTerminal",
+        "title": "VSCodeModelSwitch: Open Codex Terminal"
+      },
+      {
+        "command": "vscodemodelswitch.viewClaudeConfig",
+        "title": "VSCodeModelSwitch: View Claude Code Config"
+      },
+      {
+        "command": "vscodemodelswitch.viewCodexConfig",
+        "title": "VSCodeModelSwitch: View Codex Config"
+      },
+      {
+        "command": "vscodemodelswitch.exportPublicConfig",
+        "title": "VSCodeModelSwitch: Export Public Config"
+      },
+      {
+        "command": "vscodemodelswitch.importPublicConfig",
+        "title": "VSCodeModelSwitch: Import Public Config"
+      },
+      {
+        "command": "vscodemodelswitch.applyCurrentProvider",
+        "title": "VSCodeModelSwitch: Apply Current Provider"
+      }
+    ],
+    "configuration": {
+      "title": "VSCodeModelSwitch",
+      "properties": {
+        "vscodemodelswitch.globalCliSync": {
+          "type": "boolean",
+          "default": true,
+          "description": "Write the active provider into Claude Code and Codex config files. Enabled by default."
+        },
+        "vscodemodelswitch.configTarget": {
+          "type": "string",
+          "enum": [
+            "sandbox",
+            "real"
+          ],
+          "default": "real",
+          "description": "Choose where config writes go. real writes to your actual home directory; sandbox writes to a local test home."
+        },
+        "vscodemodelswitch.testHome": {
+          "type": "string",
+          "default": "",
+          "description": "Optional home directory override for sandbox config writes."
+        },
+        "vscodemodelswitch.anthropicVersion": {
+          "type": "string",
+          "default": "2023-06-01",
+          "description": "Anthropic API version header used when fetching Claude-compatible model lists."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -watch -p .",
+    "check": "tsc -p . --noEmit",
+    "mock:models": "node scripts/mock-model-server.js",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/vscode": "^1.96.0",
+    "@vscode/test-electron": "^2.5.2",
+    "@vscode/vsce": "^3.6.0",
+    "typescript": "^5.9.0"
+  }
+}

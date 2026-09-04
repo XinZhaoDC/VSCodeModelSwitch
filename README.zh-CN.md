@@ -1,0 +1,133 @@
+# VSCodeModelSwitch
+
+[English](README.md) | 简体中文
+
+**VSCodeModelSwitch: VSCode 里的 AI CLI Provider 切换器。**
+
+VSCodeModelSwitch 是一个 VSCode 插件，用来在 VSCode 内管理 Claude Code 和 Codex 的 provider、URL、API key 和模型。它适合经常在不同 API 网关、模型供应商、代理服务和本地测试环境之间切换的 AI 编程用户。
+
+代码仓库：[XinZhaoDC/VSModelSwitch](https://github.com/XinZhaoDC/VSModelSwitch)
+
+这是从原 VSModelSwitch 项目派生并独立维护的私有版本。原项目的 MIT
+许可证及署名保留在 `LICENSE` 中。
+
+<p align="center">
+  <img src="media/poster.png" alt="VSCodeModelSwitch 海报" width="720">
+</p>
+
+## 功能
+
+- 分别管理 Claude Code 和 Codex provider
+- 从 provider endpoint 自动获取模型列表
+- 从模型列表中选择模型，不需要手动输入模型名
+- 每个 provider 一行显示，支持快速 `Apply`
+- 每个 provider 支持重新拉取模型并切换模型
+- VSCode 状态栏分别显示 Claude 和 Codex 当前 provider / model
+- 监听配置文件变化，外部修改后自动刷新状态栏
+- API key 使用 VSCode SecretStorage 本机保存
+- provider 元数据支持 VSCode 账号同步
+- 同步到新机器后显示 `Key missing`，可用 `Set Key` 补本机 key
+- 支持不含密钥的 public config 导入/导出
+- 默认写入真实 Claude Code 和 Codex 配置文件
+- 提供 sandbox 模式用于安全测试
+
+## 当前支持
+
+- Claude Code
+- Codex
+
+## 配置写入
+
+默认情况下，VSCodeModelSwitch 会把当前 provider 写入真实本机配置：
+
+```text
+~/.claude/settings.json
+~/.codex/config.toml
+```
+
+如果需要安全测试，可以切换到 sandbox：
+
+```json
+{
+  "vscodemodelswitch.configTarget": "sandbox"
+}
+```
+
+sandbox 会写到：
+
+```text
+<workspace>/.vscodemodelswitch-home
+```
+
+## 本地开发
+
+安装依赖：
+
+```bash
+npm install
+```
+
+编译：
+
+```bash
+npm run compile
+```
+
+启动 mock 模型服务：
+
+```bash
+npm run mock:models
+```
+
+测试 endpoint：
+
+```text
+http://localhost:8787
+```
+
+测试 key：
+
+```text
+test-key
+```
+
+在 VSCode 中调试：
+
+1. 打开项目目录
+2. 按 `F5`
+3. 在 Extension Development Host 窗口中点击 VSCodeModelSwitch 侧边栏图标
+4. 添加 Claude Code 或 Codex provider
+5. 点击 `Fetch Models`
+6. 选择模型并保存
+7. 点击 provider 行上的 `Apply`
+
+## 打包
+
+```bash
+npm run package
+```
+
+会生成：
+
+```text
+vscodemodelswitch-0.1.0.vsix
+```
+
+## 配置项
+
+```json
+{
+  "vscodemodelswitch.globalCliSync": true,
+  "vscodemodelswitch.configTarget": "real",
+  "vscodemodelswitch.testHome": "",
+  "vscodemodelswitch.anthropicVersion": "2023-06-01"
+}
+```
+
+## 说明
+
+状态栏优先读取当前有效配置文件，并用 `baseUrl + model` 匹配已保存 provider。若外部插件只在运行时内存中切换模型、没有写入配置文件或提供可读取 API，VSCodeModelSwitch 无法可靠读取该内存状态。
+
+## License
+
+MIT

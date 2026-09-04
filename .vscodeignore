@@ -1,0 +1,11 @@
+.vscode/**
+.git/**
+original/**
+docs/**
+AI_Prompt/**
+src/**
+*.ts
+tsconfig.json
+package-lock.json
+scripts/**
+media/poster.png
