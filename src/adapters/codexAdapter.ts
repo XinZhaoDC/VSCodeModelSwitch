@@ -11,18 +11,7 @@ export class CodexAdapter {
     }
 
     const configPath = resolveHomePath('.codex', 'config.toml');
-    let content = (await pathExists(configPath)) ? await fs.readFile(configPath, 'utf8') : '';
-    const providerId = resolved.codex.codexProviderId;
-    const section = `model_providers.${providerId}`;
-
-    content = setTopLevelValue(content, 'model_provider', providerId);
-    if (resolved.codex.model) {
-      content = setTopLevelValue(content, 'model', resolved.codex.model);
-    }
-    content = setSectionValue(content, section, 'name', resolved.codex.providerName);
-    content = setSectionValue(content, section, 'wire_api', resolved.codex.wireApi);
-    content = setSectionValue(content, section, 'requires_openai_auth', true);
-    content = setSectionValue(content, section, 'base_url', resolved.codex.baseUrl);
+    const content = setSectionValue(resolved.codex.configText, 'model_providers.OpenAI', 'experimental_bearer_token', resolved.codex.key);
 
     await backupFile(configPath);
     await atomicWrite(configPath, content);
@@ -32,7 +21,7 @@ export class CodexAdapter {
     return resolveHomePath('.codex', 'config.toml');
   }
 
-  async readActiveConfig(): Promise<{ baseUrl?: string; model?: string; providerId?: string }> {
+  async readActiveConfig(): Promise<{ baseUrl?: string; model?: string; providerId?: string; key?: string }> {
     const configPath = this.getConfigPath();
     if (!(await pathExists(configPath))) {
       return {};
@@ -45,7 +34,8 @@ export class CodexAdapter {
     return {
       providerId,
       model,
-      baseUrl
+      baseUrl,
+      key: providerId ? getSectionStringValue(content, `model_providers.${providerId}`, 'experimental_bearer_token') : undefined
     };
   }
 }

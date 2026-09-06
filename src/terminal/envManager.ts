@@ -8,14 +8,16 @@ export class EnvManager {
     const collection = this.context.environmentVariableCollection;
     collection.persistent = false;
 
-    this.clear();
-
     const env: Record<string, string> = {};
     if (resolved.claude) {
+      collection.delete('ANTHROPIC_BASE_URL');
+      collection.delete('ANTHROPIC_AUTH_TOKEN');
       env.ANTHROPIC_BASE_URL = resolved.claude.baseUrl;
       env.ANTHROPIC_AUTH_TOKEN = resolved.claude.key;
     }
     if (resolved.codex) {
+      collection.delete('OPENAI_BASE_URL');
+      collection.delete('OPENAI_API_KEY');
       env.OPENAI_BASE_URL = resolved.codex.baseUrl;
       env.OPENAI_API_KEY = resolved.codex.key;
     }
@@ -27,10 +29,4 @@ export class EnvManager {
     return env;
   }
 
-  clear(): void {
-    const collection = this.context.environmentVariableCollection;
-    for (const key of ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'OPENAI_BASE_URL', 'OPENAI_API_KEY']) {
-      collection.delete(key);
-    }
-  }
 }

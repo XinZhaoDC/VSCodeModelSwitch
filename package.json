@@ -8,12 +8,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+ssh://git@github.com/XinZhaoDC/VSModelSwitch.git"
+    "url": "git+ssh://git@github.com/XinZhaoDC/VSCodeModelSwitch.git"
   },
   "bugs": {
-    "url": "https://github.com/XinZhaoDC/VSModelSwitch/issues"
+    "url": "https://github.com/XinZhaoDC/VSCodeModelSwitch/issues"
   },
-  "homepage": "https://github.com/XinZhaoDC/VSModelSwitch#readme",
+  "homepage": "https://github.com/XinZhaoDC/VSCodeModelSwitch#readme",
   "keywords": [
     "vscode",
     "claude-code",
@@ -34,14 +34,12 @@
     "onCommand:vscodemodelswitch.openMenu",
     "onCommand:vscodemodelswitch.addProvider",
     "onCommand:vscodemodelswitch.switchProvider",
-    "onCommand:vscodemodelswitch.refreshModels",
     "onCommand:vscodemodelswitch.openClaudeTerminal",
     "onCommand:vscodemodelswitch.openCodexTerminal",
     "onCommand:vscodemodelswitch.viewClaudeConfig",
     "onCommand:vscodemodelswitch.viewCodexConfig",
     "onCommand:vscodemodelswitch.exportPublicConfig",
-    "onCommand:vscodemodelswitch.importPublicConfig",
-    "onCommand:vscodemodelswitch.applyCurrentProvider"
+    "onCommand:vscodemodelswitch.importPublicConfig"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -77,10 +75,6 @@
         "title": "VSCodeModelSwitch: Switch Provider"
       },
       {
-        "command": "vscodemodelswitch.refreshModels",
-        "title": "VSCodeModelSwitch: Refresh Models"
-      },
-      {
         "command": "vscodemodelswitch.openClaudeTerminal",
         "title": "VSCodeModelSwitch: Open Claude Terminal"
       },
@@ -103,10 +97,6 @@
       {
         "command": "vscodemodelswitch.importPublicConfig",
         "title": "VSCodeModelSwitch: Import Public Config"
-      },
-      {
-        "command": "vscodemodelswitch.applyCurrentProvider",
-        "title": "VSCodeModelSwitch: Apply Current Provider"
       }
     ],
     "configuration": {

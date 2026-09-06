@@ -21,6 +21,43 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  if (req.url === '/user/balance') {
+    res.writeHead(200, {
+      'content-type': 'application/json'
+    });
+    res.end(JSON.stringify({
+      balance: 12.5,
+      used_quota: 7.5,
+      total_quota: 20
+    }));
+    return;
+  }
+
+  if (req.method === 'POST' && req.url === '/v1/messages') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({
+      id: 'msg_mock',
+      type: 'message',
+      role: 'assistant',
+      content: [{ type: 'text', text: 'OK' }],
+      model: 'claude-sonnet-4-20250514',
+      usage: { input_tokens: 1, output_tokens: 1 }
+    }));
+    return;
+  }
+
+  if (req.method === 'POST' && req.url === '/v1/responses') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({
+      id: 'resp_mock',
+      object: 'response',
+      status: 'completed',
+      model: 'gpt-5-codex',
+      output: []
+    }));
+    return;
+  }
+
   res.writeHead(404, {
     'content-type': 'application/json'
   });

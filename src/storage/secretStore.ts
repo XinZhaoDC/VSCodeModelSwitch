@@ -18,4 +18,8 @@ export class SecretStore {
   static ref(providerId: string, tool: 'claude' | 'codex'): string {
     return `vscodemodelswitch.provider.${providerId}.${tool}.key`;
   }
+
+  static usageRef(providerId: string): string {
+    return `vscodemodelswitch.provider.${providerId}.usage.key`;
+  }
 }

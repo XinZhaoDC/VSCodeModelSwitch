@@ -10,16 +10,11 @@ export class ClaudeAdapter {
     }
 
     const settingsPath = resolveHomePath('.claude', 'settings.json');
-    const settings = await readJsonObject(settingsPath);
+    const settings = JSON.parse(resolved.claude.configText) as Record<string, unknown>;
     const env = normalizeObject(settings.env);
 
-    env.ANTHROPIC_BASE_URL = resolved.claude.baseUrl;
     env.ANTHROPIC_AUTH_TOKEN = resolved.claude.key;
     settings.env = env;
-
-    if (resolved.claude.model) {
-      settings.model = resolved.claude.model;
-    }
 
     await backupFile(settingsPath);
     await writeJsonObject(settingsPath, settings);
@@ -29,12 +24,13 @@ export class ClaudeAdapter {
     return resolveHomePath('.claude', 'settings.json');
   }
 
-  async readActiveConfig(): Promise<{ baseUrl?: string; model?: string }> {
+  async readActiveConfig(): Promise<{ baseUrl?: string; model?: string; key?: string }> {
     const settings = await readJsonObject(this.getConfigPath());
     const env = normalizeObject(settings.env);
     return {
       baseUrl: typeof env.ANTHROPIC_BASE_URL === 'string' ? env.ANTHROPIC_BASE_URL : undefined,
-      model: typeof settings.model === 'string' ? settings.model : undefined
+      model: typeof settings.model === 'string' ? settings.model : undefined,
+      key: typeof env.ANTHROPIC_AUTH_TOKEN === 'string' ? env.ANTHROPIC_AUTH_TOKEN : undefined
     };
   }
 }

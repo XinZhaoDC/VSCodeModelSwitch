@@ -9,3 +9,7 @@ tsconfig.json
 package-lock.json
 scripts/**
 media/poster.png
+**/vscodemodelswitchbak/**
+**/.claude/settings.json
+**/.codex/config.toml
+**/*.log

@@ -6,7 +6,7 @@ VSCodeModelSwitch 是一个面向 VSCode 的 Claude Code 和 Codex provider 管�
 
 - 用户在 VSCode 内分别维护 Claude Code provider 和 Codex provider。
 - 切换 provider 后，VSCode 内新启动的 Claude Code 和 Codex 自动使用对应的 URL、key 和模型策略。
-- 模型名称不需要手动填写，由插件自动获取模型列表，用户从列表中选择。
+- 模型名称可以从接口获取、手动填写或暂时留空。
 - provider 元数据可以通过 VSCode 账号同步；API key 保持本机存储。
 - 支持导入、导出，避免多台机器混用配置。
 
@@ -16,10 +16,10 @@ VSCodeModelSwitch 是一个面向 VSCode 的 Claude Code 和 Codex provider 管�
 
 1. 一个 provider 只属于一个工具：Claude Code 或 Codex。
 2. URL 和 key 是用户必须确认的最小输入。
-3. 模型名称不手写，必须先获取模型列表再选择模型。
+3. URL 和 key 是必要输入；Model ID 是可选输入。
 4. 默认写入 CLI 配置文件，同时更新 VSCode terminal 环境变量。
 5. key 不进入 VSCode settings、workspace settings 或普通导出文件。
-6. 插件只管理自己负责的字段，写入前备份，写入时合并，不覆盖无关配置。
+6. Apply 写入前备份，并用保存的完整模板替换目标配置文件。
 
 ## Provider 数据模型
 
@@ -56,17 +56,17 @@ type ModelPolicy =
 选择工具类型 Claude Code / Codex
   -> 填 provider 名称
   -> 填 base URL 和 key
-  -> Fetch Models
-  -> 从模型列表选择模型
+  -> 可选 Fetch Models
+  -> 选择、手动填写或留空模型
   -> Save Provider
   -> Set active
 ```
 
-界面不展示普通文本输入框让用户手填模型名。模型区域显示为下拉选择：
+模型区域使用带建议列表的可编辑输入框：
 
 ```text
 [Fetch Models]
-Model: <select from fetched models>
+Model ID: <editable input with suggestions>
 ```
 
 ### OpenAI-compatible / Codex 模型获取
@@ -103,8 +103,7 @@ type OpenAIModelsResponse = {
 
 如果模型列表为空或接口不可用：
 
-- 主流程不允许保存 provider。
-- UI 提示用户检查 URL/key，或稍后通过高级 custom model 入口补充。
+- UI 显示 warning，但允许手动填写或留空模型后保存 provider。
 
 ### Anthropic-compatible / Claude Code 模型获取
 
@@ -119,9 +118,11 @@ type OpenAIModelsResponse = {
 认证：
 
 ```text
-x-api-key: <key>
+Authorization: Bearer <key>
 anthropic-version: <configured-version>
 ```
+
+认证失败时兼容回退到 `x-api-key`。
 
 解析：
 
@@ -142,8 +143,8 @@ type AnthropicModelsResponse = {
 
 如果模型列表不可用：
 
-- 主流程不允许保存 provider。
-- 如果已保存 provider 的模型列表刷新失败，继续使用已选择的固定模型，并标记为 stale。
+- UI 显示 warning，但允许手动填写或留空模型后保存 provider。
+- 如果已保存 provider 的模型列表刷新失败，继续使用原模型并记录诊断。
 
 ## 模型缓存
 
@@ -175,8 +176,8 @@ Add Provider
   -> 选择工具类型：Claude Code 或 Codex
   -> 输入 provider 名称
   -> 输入 URL/key
-  -> 点击 Fetch Models
-  -> 从模型下拉列表选择模型
+  -> 可选点击 Fetch Models
+  -> 选择、手动填写或留空模型
   -> 保存 provider
   -> 立即应用或稍后应用
 ```
@@ -207,7 +208,7 @@ Use Provider
 <effective-home>/.codex/config.toml
 ```
 
-并用 `baseUrl + model` 匹配已保存 provider。匹配成功后自动恢复对应工具的 Active provider。
+并用规范化 `baseUrl + API key` 匹配已保存 provider。末尾 `/v1` 不影响匹配；模型变化不改变 Provider 身份。
 
 默认 `<effective-home>` 是真实用户 home。设置 `vscodemodelswitch.configTarget = sandbox` 后才使用 workspace 下的 `.vscodemodelswitch-home`。
 
@@ -248,7 +249,7 @@ Use Provider
 - 默认 `<effective-home>` 是真实用户 home。
 - 设置 `vscodemodelswitch.configTarget = sandbox` 后写入测试 home。
 - 写入前备份。
-- 只改插件负责的字段。
+- 用 Provider 保存的完整配置替换目标文件。
 
 适合：
 
@@ -282,7 +283,7 @@ ANTHROPIC_AUTH_TOKEN
 }
 ```
 
-第一版保存的 provider 都带有固定模型，apply 时写入 `model` 字段。
+Provider 可以不保存模型；此时界面显示 `NULL`，Apply 保留模板中的空值或省略状态。
 
 ## Codex Adapter
 
@@ -302,17 +303,18 @@ OPENAI_API_KEY
 插件管理字段：
 
 ```toml
-model_provider = "custom"
+model_provider = "OpenAI"
 model = "..."
 
-[model_providers.custom]
-name = "Custom"
+[model_providers.OpenAI]
+name = "OpenAI"
 wire_api = "responses"
-requires_openai_auth = true
+requires_openai_auth = false
 base_url = "..."
+experimental_bearer_token = "..."
 ```
 
-Codex provider 必须带有固定模型，apply 时写入 `model` 字段。
+Codex Provider ID 固定为 `OpenAI`；Provider 显示名称只保存在插件元数据中。模型可以为空。
 
 ## 同步与导入导出
 
@@ -340,7 +342,7 @@ Model
 Key missing on this machine
 ```
 
-行内显示 `Set Key` 按钮，点击后通过 VSCode password input 保存本机 key 到 SecretStorage。
+通过 Provider 的 `Config` 打开配置编辑器，在 password input 中补充本机 key。
 
 ### Public Export
 
@@ -359,7 +361,7 @@ Key missing on this machine
 
 适合团队共享和普通备份。
 
-### Encrypted Export
+### Encrypted Export（未实现）
 
 导出包含 key 的加密备份：
 
@@ -373,7 +375,7 @@ Key missing on this machine
 }
 ```
 
-需要用户输入 passphrase。默认不启用。
+当前代码不提供此功能；本节仅保留为候选方向。
 
 ## 配置文件查看
 
@@ -430,7 +432,8 @@ Model                         Use / Active    Model
 
 工具级按钮放在分组标题或分组工具栏：
 
-- `Config`: 位于 `Claude Code Providers` / `Codex Providers` 标题右侧，打开该工具配置文件。
+- `Config`: 位于具体 Provider 卡片中，编辑其保存配置和 key。
+- `Applied Config`: 位于工具标题右侧，打开当前实际配置文件。
 - `Terminal`: 打开对应工具 terminal。
 - `Refresh`: 刷新当前 active provider 的模型缓存。
 
@@ -446,7 +449,7 @@ Codex: <provider or url> / <model>
 状态来源优先级：
 
 1. 读取当前有效配置文件。
-2. 用 `baseUrl + model` 匹配 VSCodeModelSwitch 保存过的 provider。
+2. 用规范化 `baseUrl + API key` 匹配 VSCodeModelSwitch 保存过的 provider。
 3. 匹配成功显示 provider name，匹配失败显示 URL host 和 model。
 
 插件会监听配置文件变化，并在配置文件被外部插件或手工编辑更新后刷新状态栏。
@@ -460,20 +463,20 @@ Codex: <provider or url> / <model>
 
 1. 可以分别添加 Claude Code provider 和 Codex provider。
 2. 添加 provider 时可以自动获取模型列表。
-3. 用户必须从模型列表选择模型，不能靠手写模型名完成主流程。
+3. 用户可以获取、手写或留空 Model ID。
 4. 切换 provider 后，新建 VSCode terminal 能获得正确 env。
 5. 默认写入 CLI 配置文件，并可一键查看配置文件。
 6. 可以一键打开 Claude Code terminal 和 Codex terminal。
 7. provider 元数据可以被 VSCode 账号同步。
-8. key 只保存在 SecretStorage。
+8. Provider 保存阶段 key 位于 SecretStorage；Apply 时按 CLI 要求写入目标配置。
 9. 可以导出不含 key 的 public config。
-10. 模型获取失败时，插件有明确 degraded 状态和修复入口。
+10. 模型获取失败时显示 warning，并保留手动输入与空模型保存入口。
 
 ## 后续版本
 
 - Provider templates: Anthropic, OpenAI, OpenRouter, DeepSeek, SiliconFlow, Moonshot。
 - 模型能力标签：coding、reasoning、vision、long-context。
-- Provider 健康检查和延迟测试。
+- 更广泛的 Provider Usage 适配。
 - 加密导出。
 - 配置 diff 预览。
 - cc-switch 配置导入。

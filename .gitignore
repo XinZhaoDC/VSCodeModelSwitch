@@ -4,3 +4,7 @@ out/
 .vscode-test/
 .vscodemodelswitch-home/
 *.vscodemodelswitch.*.bak
+**/vscodemodelswitchbak/
+**/.claude/settings.json
+**/.codex/config.toml
+*.log

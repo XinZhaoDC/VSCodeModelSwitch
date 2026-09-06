@@ -5,12 +5,14 @@ const PROVIDERS_KEY = 'vscodemodelswitch.providers';
 const CURRENT_PROVIDER_IDS_KEY = 'vscodemodelswitch.currentProviderIds';
 const LEGACY_CURRENT_PROVIDER_ID_KEY = 'vscodemodelswitch.currentProviderId';
 const MODEL_CACHE_KEY = 'vscodemodelswitch.modelCache';
+const TOOL_ENABLED_KEY = 'vscodemodelswitch.toolEnabled';
 
 export class ProviderStore {
   constructor(private readonly context: vscode.ExtensionContext) {
     this.context.globalState.setKeysForSync([
       PROVIDERS_KEY,
-      CURRENT_PROVIDER_IDS_KEY
+      CURRENT_PROVIDER_IDS_KEY,
+      TOOL_ENABLED_KEY
     ]);
   }
 
@@ -54,6 +56,29 @@ export class ProviderStore {
     return updated;
   }
 
+  async deleteProvider(id: string): Promise<ProviderProfile | undefined> {
+    const providers = this.getProviders();
+    const index = providers.findIndex((item) => item.id === id);
+    if (index < 0) return undefined;
+    const [deleted] = providers.splice(index, 1);
+    await this.saveProviders(providers);
+    for (const tool of ['claude', 'codex'] as ToolId[]) {
+      if (this.getCurrentProviderId(tool) === id) await this.setCurrentProviderId(tool, undefined);
+    }
+    return deleted;
+  }
+
+  async moveProvider(providerId: string, beforeProviderId: string): Promise<void> {
+    const providers = this.getProviders();
+    const sourceIndex = providers.findIndex((provider) => provider.id === providerId);
+    const targetIndex = providers.findIndex((provider) => provider.id === beforeProviderId);
+    if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) return;
+    const [provider] = providers.splice(sourceIndex, 1);
+    const insertionIndex = sourceIndex < targetIndex ? targetIndex - 1 : targetIndex;
+    providers.splice(insertionIndex, 0, provider);
+    await this.saveProviders(providers);
+  }
+
   getProvidersByTool(tool: ToolId): ProviderProfile[] {
     return this.getProviders().filter((provider) => provider.tool === tool);
   }
@@ -95,6 +120,17 @@ export class ProviderStore {
       delete current[tool];
     }
     await this.context.globalState.update(CURRENT_PROVIDER_IDS_KEY, current);
+  }
+
+  getToolEnabled(tool: ToolId): boolean {
+    const value = this.context.globalState.get<Partial<Record<ToolId, boolean>>>(TOOL_ENABLED_KEY, {});
+    return value[tool] !== false;
+  }
+
+  async setToolEnabled(tool: ToolId, enabled: boolean): Promise<void> {
+    const value = this.context.globalState.get<Partial<Record<ToolId, boolean>>>(TOOL_ENABLED_KEY, {});
+    value[tool] = enabled;
+    await this.context.globalState.update(TOOL_ENABLED_KEY, value);
   }
 
   getModelCache(): ModelCacheEntry[] {
