@@ -2,6 +2,7 @@
 .git/**
 original/**
 docs/**
+!docs/native-proxy.md
 AI_Prompt/**
 src/**
 *.ts

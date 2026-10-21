@@ -30,7 +30,7 @@ export class ClaudeAdapter {
     return {
       baseUrl: typeof env.ANTHROPIC_BASE_URL === 'string' ? env.ANTHROPIC_BASE_URL : undefined,
       model: typeof settings.model === 'string' ? settings.model : undefined,
-      key: typeof env.ANTHROPIC_AUTH_TOKEN === 'string' ? env.ANTHROPIC_AUTH_TOKEN : undefined
+      key: typeof env.ANTHROPIC_AUTH_TOKEN === 'string' && env.ANTHROPIC_AUTH_TOKEN ? env.ANTHROPIC_AUTH_TOKEN : typeof env.ANTHROPIC_API_KEY === 'string' ? env.ANTHROPIC_API_KEY : undefined
     };
   }
 }

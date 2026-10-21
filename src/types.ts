@@ -1,4 +1,5 @@
 export type ToolId = 'claude' | 'codex';
+export type CodexMode = 'official' | 'api';
 
 export type ModelPolicy =
   | { type: 'toolDefault' }
@@ -10,6 +11,7 @@ export interface ToolEndpointConfig {
   baseUrl: string;
   modelPolicy: ModelPolicy;
   secretRef: string;
+  proxy?: ProxyConfig;
 }
 
 export interface CodexEndpointConfig {
@@ -27,9 +29,54 @@ export interface ProviderProfile {
   configText?: string;
   configMode?: 'generated' | 'custom';
   usageQuery?: UsageQueryConfig;
+  proxy?: ProxyConfig;
+  codexMode?: CodexMode;
   codex?: CodexEndpointConfig;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface ProxyConfig {
+  mode: 'direct' | 'proxy';
+  preset: 'justdowork' | 'custom';
+  overrides?: Partial<ProxyOptions>;
+}
+
+export interface ProxyOptions {
+  messagesPath: string;
+  authMode: 'bearer' | 'x-api-key' | 'both' | 'custom';
+  authHeader: string;
+  headers: Record<string, string>;
+  parameters: Record<string, unknown>;
+  rebuildStream: boolean;
+  toolInjection: boolean;
+  repairToolJson: boolean;
+  nativeToolMap: Record<string, string>;
+  toolDescriptionChars: number;
+  maxHistoryChars: number;
+  maxToolResultChars: number;
+  maxOutputTokens: number;
+  timeoutMs: number;
+  keepAliveMs: number;
+  maxAttempts: number;
+  extraThinkingBudget: number;
+  maxThinkingBudget: number;
+  cacheSystemPrefix: boolean;
+  webTools: boolean;
+  webSearchResults: number;
+  webFetchMaxChars: number;
+  maxWebIterations: number;
+}
+
+export interface ProxyRuntime {
+  state: 'stopped' | 'running';
+  localUrl?: string;
+  requests: number;
+  succeeded: number;
+  failed: number;
+  retries: number;
+  trimmedMessages: number;
+  lastRequest?: { ok: boolean; status?: number; durationMs: number; error?: string };
 }
 
 export interface ModelInfo {
@@ -124,6 +171,7 @@ export interface ResolvedProvider {
     key: string;
     model?: string;
     configText: string;
+    proxy?: boolean;
   };
   codex?: {
     providerId: string;
@@ -134,6 +182,7 @@ export interface ResolvedProvider {
     codexProviderId: string;
     wireApi: 'responses' | 'chat';
     configText: string;
+    mode: CodexMode;
   };
   missingSecrets: ToolId[];
   degraded: string[];

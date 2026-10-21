@@ -2,6 +2,61 @@
 
 This project can be validated locally without publishing to the VSCode Marketplace.
 
+## Codex mode controls and Verify Model fix — v0.3.3 — 2026-10-21
+
+The Codex section now exposes tool-level `Apply Official` and `Apply API` radio
+actions. Both clear `config.toml` and `auth.json`; Official mode leaves Codex
+ready for a fresh login, while API mode writes the selected API provider after
+the clean reset. Codex API provider editing follows the Claude Code flow.
+
+Validation completed:
+
+- TypeScript check and compile passed.
+- `scripts/test-codex-modes.js`: **8 passed, 0 failed**.
+- `scripts/test-proxy.js`: **44 passed, 0 failed**.
+- `vscodemodelswitch-0.3.3.vsix` was packaged and inspected for the new radio
+  controls and compiled Codex adapter.
+- Tests use sandbox paths and synthetic credentials; real Codex files and
+  SecretStorage were not modified.
+
+After installing the VSIX, run `Developer: Reload Window` and accept the first
+official-mode login interactively in Codex. The real client login and provider
+endpoints remain installation-time checks.
+
+## Native proxy v0.2.0 validation — 2026-10-13
+
+## Native proxy v0.2.1 host-proxy transport — 2026-10-17
+
+`src/proxy/transport.ts` now uses the extension host's global `fetch` for
+ordinary relay requests, retries and web tools. TypeScript check/compile passed;
+the local suite completed **44 passed, 0 failed**, including an explicit test
+that the shared transport calls `fetch`, preserves manual redirects, response
+headers and response bytes. VSIX `vscodemodelswitch-0.2.1-host-proxy.vsix` was
+packaged with the compiled proxy modules. No live provider request or client
+configuration was changed. Install the new VSIX in the remote VS Code window
+before doing AgentRouter end-to-end verification.
+
+TypeScript check and compilation passed using the existing Node22 prefix.
+`scripts/test-proxy.js` completed **43 passed, 0 failed** against loopback HTTP,
+mocked VS Code APIs and the generated webview's JavaScript/DOM message flow.
+
+The checks cover reconstructed/native SSE, terminal events/errors, JSON/tool
+repair, paired history trimming, provider isolation, retries/cancellation,
+WebFetch/image inputs, mixed web/client-tool deferral, Save/Apply/Verify
+separation, metadata/config-write rollback, reload, terminal-only mode and
+existing-provider UI editing/reset/cancel. They do not access provider keys or
+the internet and do not write real CLI configuration files.
+
+The VSIX `vscodemodelswitch-0.2.0-native-proxy.vsix` was built and its archive
+checked for all six proxy modules, matching compiled files, workspace-host
+metadata, usage documentation and the adapted modules' license/notice. Python
+dependencies, auth files and test environments are absent from the archive.
+
+No extension was installed or published. Visual rendering in a real VS Code
+webview and actual Claude/justdowork end-to-end behavior remain to be accepted
+after installation. These local results do not supersede the separate relay
+availability test. Evidence: Interface `.ai/results/HO-20261013-002-result.md`.
+
 ## 1. Compile
 
 ```bash

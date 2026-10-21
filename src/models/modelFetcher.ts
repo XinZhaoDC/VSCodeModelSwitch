@@ -1,6 +1,7 @@
 import { promises as dns } from 'dns';
 import * as vscode from 'vscode';
-import { ModelInfo, NetworkTestResult, ToolId } from '../types';
+import { ModelInfo, NetworkTestResult, ProxyConfig, ToolId } from '../types';
+import { proxyAuthHeaders } from '../proxy/config';
 
 type ModelsResponse = {
   data?: Array<{
@@ -16,7 +17,7 @@ export class ModelFetchError extends Error {
   }
 }
 
-export async function fetchModels(tool: ToolId, baseUrl: string, apiKey: string, signal?: AbortSignal): Promise<ModelInfo[]> {
+export async function fetchModels(tool: ToolId, baseUrl: string, apiKey: string, signal?: AbortSignal, proxy?: ProxyConfig): Promise<ModelInfo[]> {
   const candidates = buildModelUrls(baseUrl);
   const errors: string[] = [];
   const dnsResult = await resolveEndpointDns(baseUrl);
@@ -31,7 +32,7 @@ export async function fetchModels(tool: ToolId, baseUrl: string, apiKey: string,
 
   for (const url of candidates) {
     if (signal?.aborted) throw new ModelFetchError('Model fetch cancelled', errors.join('; '));
-    for (const headers of buildAuthHeaderCandidates(tool, apiKey)) {
+    for (const headers of buildAuthHeaderCandidates(tool, apiKey, proxy)) {
       const controller = new AbortController();
       const cancel = () => controller.abort();
       if (signal?.aborted) controller.abort();
@@ -64,7 +65,7 @@ export async function fetchModels(tool: ToolId, baseUrl: string, apiKey: string,
   throw new ModelFetchError('Unable to fetch model list', errors.join('; '));
 }
 
-export async function testModelsEndpoint(tool: ToolId, baseUrl: string, apiKey: string, signal?: AbortSignal): Promise<NetworkTestResult> {
+export async function testModelsEndpoint(tool: ToolId, baseUrl: string, apiKey: string, signal?: AbortSignal, proxy?: ProxyConfig): Promise<NetworkTestResult> {
   const checkedAt = new Date().toISOString();
   const errors: string[] = [];
   const dnsResult = await resolveEndpointDns(baseUrl);
@@ -82,7 +83,7 @@ export async function testModelsEndpoint(tool: ToolId, baseUrl: string, apiKey: 
   }
 
   for (const endpoint of buildModelUrls(baseUrl)) {
-    for (const headers of buildAuthHeaderCandidates(tool, apiKey)) {
+    for (const headers of buildAuthHeaderCandidates(tool, apiKey, proxy)) {
       const attempt = await requestText(endpoint, headers, signal, 6_000);
       if (attempt.cancelled) return cancelledNetworkResult(checkedAt, dnsResult);
       if (!attempt.response) {
@@ -134,7 +135,7 @@ export async function testModelsEndpoint(tool: ToolId, baseUrl: string, apiKey: 
   }
 
   const reachabilityEndpoint = buildReachabilityUrl(baseUrl);
-  for (const headers of buildAuthHeaderCandidates(tool, apiKey)) {
+  for (const headers of buildAuthHeaderCandidates(tool, apiKey, proxy)) {
     const attempt = await requestText(reachabilityEndpoint, headers, signal, 6_000);
     if (attempt.cancelled) return cancelledNetworkResult(checkedAt, dnsResult);
     if (!attempt.response) {
@@ -185,7 +186,8 @@ function buildReachabilityUrl(baseUrl: string): string {
   }
 }
 
-export function buildAuthHeaderCandidates(tool: ToolId, apiKey: string): Record<string, string>[] {
+export function buildAuthHeaderCandidates(tool: ToolId, apiKey: string, proxy?: ProxyConfig): Record<string, string>[] {
+  if (tool === 'claude' && proxy?.mode === 'proxy') return [proxyAuthHeaders(apiKey, proxy)];
   if (tool === 'claude') {
     const anthropicVersion = vscode.workspace
       .getConfiguration('vscodemodelswitch')

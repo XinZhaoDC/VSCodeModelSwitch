@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
-import { ApiStatusRow, CompatibilityResult, ModelInfo, ModelPolicy, NetworkTestResult, ProviderProfile, StatusState, ToolId, UsageQueryConfig, UsageQueryResult } from '../types';
+import { ApiStatusRow, CodexMode, CompatibilityResult, ModelInfo, ModelPolicy, NetworkTestResult, ProviderProfile, ProxyConfig, ProxyRuntime, StatusState, ToolId, UsageQueryConfig, UsageQueryResult } from '../types';
+import { proxyDefaults } from '../proxy/config';
 
 export interface SidebarProviderSummary {
   id: string;
@@ -13,6 +14,10 @@ export interface SidebarProviderSummary {
   usageResult?: UsageQueryResult;
   usageEnabled: boolean;
   compatibility?: CompatibilityResult;
+  proxy?: ProxyConfig;
+  proxyRuntime?: ProxyRuntime;
+  needsApply?: boolean;
+  codexMode?: CodexMode;
 }
 
 export interface SidebarViewState {
@@ -23,6 +28,7 @@ export interface SidebarViewState {
   configTarget: string;
   configPaths: Record<ToolId, string>;
   toolEnabled: Record<ToolId, boolean>;
+  codexMode: CodexMode | 'unknown';
   apiStatuses: ApiStatusRow[];
   storageSizes: {
     logBytes: number;
@@ -41,17 +47,21 @@ export interface CreateProviderInput {
   applyNow: boolean;
   configMode?: 'generated' | 'custom';
   configText?: string;
+  proxy?: ProxyConfig;
+  codexMode?: CodexMode;
 }
 
 export interface SidebarController {
   getSidebarState(): Promise<SidebarViewState>;
   reloadStateFromSidebar(): Promise<void>;
-  previewModelsFromSidebar(tool: ToolId, baseUrl: string, key: string): Promise<ModelInfo[]>;
+  previewModelsFromSidebar(tool: ToolId, baseUrl: string, key: string, proxy?: ProxyConfig): Promise<ModelInfo[]>;
   createProviderFromSidebar(input: CreateProviderInput): Promise<void>;
   setCurrentProviderFromSidebar(providerId: string): Promise<void>;
-  getProviderConfigFromSidebar(providerId: string): Promise<{ providerId: string; tool: ToolId; text: string; hasKey: boolean; usageQuery: UsageQueryConfig; usageHasToken: boolean }>;
-  saveProviderConfigFromSidebar(providerId: string, text: string, key?: string, usageQuery?: UsageQueryConfig, usageAccessToken?: string): Promise<void>;
+  getProviderConfigFromSidebar(providerId: string): Promise<{ providerId: string; tool: ToolId; text: string; hasKey: boolean; usageQuery: UsageQueryConfig; usageHasToken: boolean; proxy: ProxyConfig; codexMode?: CodexMode }>;
+  saveProviderConfigFromSidebar(providerId: string, text: string, key?: string, usageQuery?: UsageQueryConfig, usageAccessToken?: string, proxy?: ProxyConfig, codexMode?: CodexMode): Promise<void>;
+  controlProxyFromSidebar(providerId: string, action: 'start' | 'stop' | 'restart' | 'log'): Promise<void>;
   applyProviderFromSidebar(providerId: string): Promise<void>;
+  applyCodexModeFromSidebar(mode: CodexMode): Promise<void>;
   deleteProviderFromSidebar(providerId: string): Promise<void>;
   moveProviderFromSidebar(providerId: string, beforeProviderId: string): Promise<void>;
   testProviderNetworkFromSidebar(providerId: string): Promise<void>;
@@ -72,12 +82,14 @@ export interface SidebarController {
 
 type IncomingMessage =
   | { type: 'ready' }
-  | { type: 'previewModels'; tool: ToolId; baseUrl: string; key: string }
+  | { type: 'previewModels'; tool: ToolId; baseUrl: string; key: string; proxy?: ProxyConfig }
   | { type: 'createProvider'; payload: CreateProviderInput }
   | { type: 'setCurrentProvider'; providerId: string }
   | { type: 'openProviderConfig'; providerId: string }
-  | { type: 'saveProviderConfig'; providerId: string; text: string; key?: string; usageQuery?: UsageQueryConfig; usageAccessToken?: string }
+  | { type: 'saveProviderConfig'; providerId: string; text: string; key?: string; usageQuery?: UsageQueryConfig; usageAccessToken?: string; proxy?: ProxyConfig; codexMode?: CodexMode }
+  | { type: 'controlProxy'; providerId: string; action: 'start' | 'stop' | 'restart' | 'log' }
   | { type: 'applyProvider'; providerId: string }
+  | { type: 'applyCodexMode'; mode: CodexMode }
   | { type: 'deleteProvider'; providerId: string }
   | { type: 'moveProvider'; providerId: string; beforeProviderId: string }
   | { type: 'testProviderNetwork'; providerId: string }
@@ -153,7 +165,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
           await this.refresh();
           return;
         case 'previewModels': {
-          const models = await this.controller.previewModelsFromSidebar(message.tool, message.baseUrl, message.key);
+          const models = await this.controller.previewModelsFromSidebar(message.tool, message.baseUrl, message.key, message.proxy);
           await this.view?.webview.postMessage({ type: 'models', models });
           await this.postNotice(`Fetched ${models.length} models.`);
           break;
@@ -173,14 +185,24 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
                   break;
                 }
                 case 'saveProviderConfig':
-                  await this.controller.saveProviderConfigFromSidebar(message.providerId, message.text, message.key, message.usageQuery, message.usageAccessToken);
-                  await this.view?.webview.postMessage({ type: 'configSaved', text: message.text, usageQuery: message.usageQuery });
-                  await this.postNotice('Provider configuration saved.');
+                  await this.controller.saveProviderConfigFromSidebar(message.providerId, message.text, message.key, message.usageQuery, message.usageAccessToken, message.proxy, message.codexMode);
+                  const saved = await this.controller.getProviderConfigFromSidebar(message.providerId);
+                  await this.view?.webview.postMessage({ type: 'configSaved', text: saved.text, usageQuery: saved.usageQuery, proxy: saved.proxy, codexMode: saved.codexMode });
+                  await this.postNotice('Provider configuration saved. Apply to use these changes.');
+                  break;
+                case 'controlProxy':
+                  await this.controller.controlProxyFromSidebar(message.providerId, message.action);
                   break;
                 case 'applyProvider':
                   await this.controller.applyProviderFromSidebar(message.providerId);
                   await this.postNotice('Provider applied.');
                   break;
+        case 'applyCodexMode':
+          await this.controller.applyCodexModeFromSidebar(message.mode);
+          await this.postNotice(message.mode === 'official'
+            ? 'Codex official mode applied. Open Codex and sign in again.'
+            : 'Codex API mode applied.');
+          break;
                 case 'deleteProvider':
                   await this.controller.deleteProviderFromSidebar(message.providerId);
                   await this.postNotice('Provider deleted. Applied config files were kept.');
@@ -455,6 +477,16 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
     }
     .check { display: flex; align-items: center; gap: 7px; color: var(--vscode-sideBar-foreground); font-size: 12px; }
     .check input { width: auto; min-height: auto; margin: 0; }
+    .modeOptions { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 8px; }
+    .modeOption { display: flex; align-items: center; gap: 6px; color: var(--vscode-sideBar-foreground); font-size: 12px; }
+    .modeOption input { width: auto; min-height: auto; margin: 0; }
+    .proxySettings { display: flex; flex-direction: column; gap: 7px; }
+    .proxySettings[hidden], .proxyOptions[hidden] { display: none; }
+    .proxyOptions { display: flex; flex-direction: column; gap: 7px; }
+    .proxySettings details { border-top: 1px solid var(--vscode-widget-border); padding-top: 7px; }
+    .proxySettings summary, .proxyDetails summary { cursor: pointer; color: var(--vscode-descriptionForeground); }
+    .proxySettings textarea { min-height: 75px; }
+    .proxyDetails { font-size: 12px; overflow-wrap: anywhere; }
     .empty {
       padding: 9px;
       border-style: dashed;
@@ -488,6 +520,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
           <label for="configKey">API Key</label>
           <input id="configKey" type="password" placeholder="Leave empty to keep the stored key" autocomplete="off">
         </div>
+        ${renderProxyFields('edit')}
         <label class="check"><input id="usageEnabled" type="checkbox"> Enable Usage Query</label>
         <div id="usageFields" class="field">
           <label for="usagePreset">Usage preset</label>
@@ -561,6 +594,14 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
         <button id="viewCodexConfigButton">Applied Config</button>
       </div>
       <div id="codexToolPanel" class="panel">
+        <div class="field">
+          <label>Codex mode</label>
+          <div class="modeOptions">
+            <label class="modeOption"><input id="codexOfficialMode" type="radio" name="codexApplyMode" value="official"> Apply Official</label>
+            <label class="modeOption"><input id="codexApiMode" type="radio" name="codexApplyMode" value="api"> Apply API</label>
+          </div>
+          <div class="small">Both actions clear config.toml and auth.json first. Official mode then requires Codex login; API mode applies the selected API provider.</div>
+        </div>
         <div id="codexProviders" class="providerList"></div>
         <div class="actions four">
           <button id="openCodexButton">Terminal</button>
@@ -611,6 +652,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
           <input id="modelSelect" type="text" list="modelOptions" placeholder="Fetch models or enter an ID" autocomplete="off">
           <datalist id="modelOptions"></datalist>
         </div>
+        ${renderProxyFields('add')}
         <label class="check"><input id="applyNow" type="checkbox"> Set active after saving</label>
         <button id="saveButton" class="primary" type="submit" disabled>Save Provider</button>
         <div id="addNotice" class="notice"></div>
@@ -630,6 +672,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
 
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
+    const proxyPresets = ${JSON.stringify({ justdowork: proxyDefaults('justdowork'), custom: proxyDefaults('custom') })};
     let state = {
       providers: [],
       currentProviderIds: {},
@@ -638,6 +681,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
       configTarget: 'real',
       configPaths: { claude: '', codex: '' },
       toolEnabled: { claude: true, codex: true },
+      codexMode: 'unknown',
       apiStatuses: [],
       storageSizes: { logBytes: 0, backupBytes: 0, claudeBackupBytes: 0, codexBackupBytes: 0 }
     };
@@ -649,6 +693,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
     let configOriginalText = '';
     let configOriginalKey = '';
     let configOriginalUsage = undefined;
+    let configOriginalProxy = undefined;
     const savedViewState = vscode.getState() || {};
     const collapsed = { claude: Boolean(savedViewState.claudeCollapsed), codex: Boolean(savedViewState.codexCollapsed) };
 
@@ -701,6 +746,8 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
       modelField: document.getElementById('modelField'),
       configEditor: document.getElementById('configEditor'),
       configEditorTool: document.getElementById('configEditorTool'),
+      codexOfficialMode: document.getElementById('codexOfficialMode'),
+      codexApiMode: document.getElementById('codexApiMode'),
       configText: document.getElementById('configText'),
       configKey: document.getElementById('configKey'),
       usageEnabled: document.getElementById('usageEnabled'),
@@ -748,6 +795,9 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
         configOriginalText = message.text;
         configOriginalKey = '';
         configOriginalUsage = message.usageQuery;
+        configOriginalProxy = message.proxy;
+        setProxyConfig('edit', message.proxy);
+        updateProxyVisibility('edit', message.tool);
         el.configEditor.hidden = false;
         el.configText.focus();
         return;
@@ -756,6 +806,9 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
         configOriginalText = message.text;
         configOriginalKey = '';
         configOriginalUsage = message.usageQuery;
+        configOriginalProxy = message.proxy;
+        el.configText.value = message.text;
+        setProxyConfig('edit', message.proxy);
         el.configKey.value = '';
         return;
       }
@@ -803,10 +856,15 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
     el.clearLogButton.addEventListener('click', () => post({ type: 'clearLog' }));
     el.deleteClaudeBackupsButton.addEventListener('click', () => post({ type: 'deleteBackups', tool: 'claude' }));
     el.deleteCodexBackupsButton.addEventListener('click', () => post({ type: 'deleteBackups', tool: 'codex' }));
+    el.codexOfficialMode.addEventListener('change', () => { if (el.codexOfficialMode.checked) post({ type: 'applyCodexMode', mode: 'official' }); });
+    el.codexApiMode.addEventListener('change', () => { if (el.codexApiMode.checked) post({ type: 'applyCodexMode', mode: 'api' }); });
     el.addMode.addEventListener('change', updateAddMode);
     el.tool.addEventListener('change', () => { resetModels(); updateAddMode(); });
     el.addConfigText.addEventListener('input', updateSaveState);
-    el.saveConfigButton.addEventListener('click', () => post({ type: 'saveProviderConfig', providerId: configEditorProviderId, text: el.configText.value, key: el.configKey.value, usageQuery: getUsageQuery(), usageAccessToken: el.usageAccessToken.value }));
+    el.saveConfigButton.addEventListener('click', () => {
+      try { post({ type: 'saveProviderConfig', providerId: configEditorProviderId, text: el.configText.value, key: el.configKey.value, usageQuery: getUsageQuery(), usageAccessToken: el.usageAccessToken.value, proxy: getProxyConfig('edit') }); }
+      catch (error) { showNotice(error.message, true); }
+    });
     el.usageEnabled.addEventListener('change', updateUsageVisibility);
     el.usagePreset.addEventListener('change', applyUsagePreset);
     el.testUsageButton.addEventListener('click', () => post({ type: 'testUsageQuery', providerId: configEditorProviderId, usageQuery: getUsageQuery(), usageAccessToken: el.usageAccessToken.value }));
@@ -814,17 +872,19 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
       el.configText.value = configOriginalText;
       el.configKey.value = configOriginalKey;
       setUsageQuery(configOriginalUsage);
+      setProxyConfig('edit', configOriginalProxy);
     });
     el.closeConfigButton.addEventListener('click', () => {
       el.configText.value = configOriginalText;
       el.configKey.value = configOriginalKey;
       setUsageQuery(configOriginalUsage);
+      setProxyConfig('edit', configOriginalProxy);
       el.configEditor.hidden = true;
     });
     el.fetchModelsButton.addEventListener('click', () => fetchModels());
     el.form.addEventListener('submit', (event) => {
       event.preventDefault();
-      saveProvider();
+      try { saveProvider(); } catch (error) { showAddNotice(error.message, true); }
     });
     el.baseUrl.addEventListener('input', resetModels);
     el.apiKey.addEventListener('input', resetModels);
@@ -838,6 +898,8 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
       el.codexPath.textContent = 'Config: ' + state.configPaths.codex;
       el.claudeEnabled.checked = state.toolEnabled.claude;
       el.codexEnabled.checked = state.toolEnabled.codex;
+      el.codexOfficialMode.checked = state.codexMode === 'official';
+      el.codexApiMode.checked = state.codexMode === 'api';
       el.claudeSection.classList.toggle('toolDisabled', !state.toolEnabled.claude);
       el.codexSection.classList.toggle('toolDisabled', !state.toolEnabled.codex);
       applyCollapseState();
@@ -917,6 +979,39 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
           badge.textContent = 'Active';
           meta.appendChild(badge);
         }
+        const connection = document.createElement('div');
+        connection.className = 'providerModel';
+        connection.textContent = provider.tool === 'codex'
+          ? 'Connection: Codex ' + (provider.codexMode === 'official' ? 'Official account' : 'API source')
+          : provider.proxy && provider.proxy.mode === 'proxy'
+          ? 'Connection: Built-in proxy · ' + provider.proxy.preset + (Object.keys(provider.proxy.overrides || {}).length ? ' · Customized' : '')
+          : 'Connection: Direct';
+        meta.appendChild(connection);
+        if (provider.needsApply) {
+          const pending = document.createElement('div'); pending.className = 'providerWarning';
+          pending.textContent = 'Configuration changed · Pending Apply'; meta.appendChild(pending);
+        }
+        if (provider.proxy && provider.proxy.mode === 'proxy' || provider.needsApply && provider.proxyRuntime && provider.proxyRuntime.localUrl) {
+          const runtime = provider.proxyRuntime || { state: 'stopped', requests: 0, succeeded: 0, failed: 0, retries: 0, trimmedMessages: 0 };
+          const local = document.createElement('div'); local.className = 'providerModel';
+          local.textContent = 'Proxy: ' + (runtime.state === 'running' ? 'Running' : 'Stopped'); meta.appendChild(local);
+          const upstream = document.createElement('div'); upstream.className = runtime.lastRequest && !runtime.lastRequest.ok ? 'providerWarning' : 'providerModel';
+          upstream.textContent = runtime.lastRequest ? 'Last model request: ' + (runtime.lastRequest.ok ? 'Passed' : 'Failed · HTTP ' + runtime.lastRequest.status + ' · ' + runtime.lastRequest.error) : 'Model availability: Not verified';
+          meta.appendChild(upstream);
+          const details = document.createElement('details'); details.className = 'proxyDetails';
+          const summary = document.createElement('summary'); summary.textContent = 'Proxy Details'; details.appendChild(summary);
+          const info = document.createElement('div');
+          info.textContent = (runtime.localUrl || 'Apply to start a local endpoint') + ' | Requests ' + runtime.requests + ', passed ' + runtime.succeeded + ', failed ' + runtime.failed + ', retries ' + runtime.retries + ', omitted history messages ' + runtime.trimmedMessages;
+          details.appendChild(info);
+          const controls = document.createElement('div'); controls.className = 'actions three';
+          for (const action of [runtime.state === 'running' ? 'stop' : 'start', 'restart', 'log']) {
+            const button = document.createElement('button'); button.textContent = action[0].toUpperCase() + action.slice(1);
+            button.disabled = busy || !enabled || (action !== 'log' && !active && !runtime.localUrl);
+            button.title = action === 'start' || action === 'restart' ? 'Resume the last applied configuration; use Apply for saved changes.' : '';
+            button.addEventListener('click', () => post({ type: 'controlProxy', providerId: provider.id, action })); controls.appendChild(button);
+          }
+          details.appendChild(controls); meta.appendChild(details);
+        }
         if (provider.compatibility) {
           const compatibility = document.createElement('div');
           compatibility.className = provider.compatibility.ok ? 'providerModel' : 'providerWarning';
@@ -968,17 +1063,17 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
         deleteButton.addEventListener('click', () => post({ type: 'deleteProvider', providerId: provider.id }));
         const networkButton = document.createElement('button');
         networkButton.textContent = 'Network & Usage';
-        networkButton.disabled = busy || !enabled || !provider.hasKey;
+        networkButton.disabled = busy || !enabled || !provider.hasKey || (provider.tool === 'codex' && provider.codexMode === 'official');
         networkButton.addEventListener('click', () => post({ type: 'testProviderNetwork', providerId: provider.id }));
         actions.appendChild(networkButton);
         const modelButton = document.createElement('button');
         modelButton.textContent = 'Model';
-        modelButton.disabled = busy || !enabled || !provider.hasKey;
+        modelButton.disabled = busy || !enabled || !provider.hasKey || (provider.tool === 'codex' && provider.codexMode === 'official');
         modelButton.addEventListener('click', () => post({ type: 'updateProviderModel', providerId: provider.id }));
         actions.appendChild(modelButton);
         const verifyButton = document.createElement('button');
         verifyButton.textContent = 'Verify Model';
-        verifyButton.disabled = busy || !enabled || !provider.hasKey || !hasConfiguredModel(provider.modelPolicy);
+        verifyButton.disabled = busy || !enabled || !provider.hasKey || (provider.tool === 'codex' && provider.codexMode === 'official') || !hasConfiguredModel(provider.modelPolicy);
         verifyButton.addEventListener('click', () => post({ type: 'verifyProviderModel', providerId: provider.id }));
         actions.appendChild(verifyButton);
         actions.appendChild(deleteButton);
@@ -995,10 +1090,12 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
         showNotice('URL and key are required before fetching models.', true);
         return;
       }
-      post({ type: 'previewModels', tool, baseUrl, key });
+      try { post({ type: 'previewModels', tool, baseUrl, key, proxy: getProxyConfig('add') }); }
+      catch (error) { showAddNotice(error.message, true); }
     }
 
     function updateAddMode() {
+      updateProxyVisibility('add', el.tool.value);
       for (const option of el.tool.options) option.disabled = !state.toolEnabled[option.value];
       if (el.tool.options[el.tool.selectedIndex].disabled) {
         el.tool.value = state.toolEnabled.claude ? 'claude' : 'codex';
@@ -1084,7 +1181,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
           return;
         }
         showAddNotice('Saving provider...', false);
-        post({ type: 'createProvider', payload: { tool: el.tool.value, name: el.providerName.value.trim(), key: '', baseUrl: '', model: '', applyNow: el.applyNow.checked, configMode: 'custom', configText: el.addConfigText.value } });
+        post({ type: 'createProvider', payload: { tool: el.tool.value, name: el.providerName.value.trim(), key: '', baseUrl: '', model: '', applyNow: el.applyNow.checked, configMode: 'custom', configText: el.addConfigText.value, proxy: getProxyConfig('add') } });
         return;
       }
       const payload = {
@@ -1093,7 +1190,8 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
         baseUrl: el.baseUrl.value.trim(),
         key: el.apiKey.value,
         model: el.modelSelect.value,
-        applyNow: el.applyNow.checked
+        applyNow: el.applyNow.checked,
+        proxy: getProxyConfig('add')
       };
       if (!payload.name || !payload.baseUrl || !payload.key) {
         showNotice('Name, URL, and key are required.', true);
@@ -1163,15 +1261,17 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
 
     function updateActionState() {
       el.openClaudeButton.disabled = busy || !state.toolEnabled.claude || !findCurrent('claude');
-      el.openCodexButton.disabled = busy || !state.toolEnabled.codex || !findCurrent('codex');
+      el.openCodexButton.disabled = busy || !state.toolEnabled.codex || (state.codexMode !== 'official' && !findCurrent('codex'));
       el.viewClaudeConfigButton.disabled = busy;
       el.viewCodexConfigButton.disabled = busy;
       el.refreshClaudeModelsButton.disabled = busy || !state.toolEnabled.claude;
-      el.refreshCodexModelsButton.disabled = busy || !state.toolEnabled.codex;
+      el.refreshCodexModelsButton.disabled = busy || !state.toolEnabled.codex || state.codexMode === 'official';
       el.testClaudeNetworkButton.disabled = busy || !state.toolEnabled.claude;
-      el.testCodexNetworkButton.disabled = busy || !state.toolEnabled.codex;
+      el.testCodexNetworkButton.disabled = busy || !state.toolEnabled.codex || state.codexMode === 'official';
       el.deleteClaudeBackupsButton.disabled = busy || !state.toolEnabled.claude;
       el.deleteCodexBackupsButton.disabled = busy || !state.toolEnabled.codex;
+      el.codexOfficialMode.disabled = busy || !state.toolEnabled.codex;
+      el.codexApiMode.disabled = busy || !state.toolEnabled.codex || !state.providers.some((provider) => provider.tool === 'codex' && provider.codexMode !== 'official' && provider.hasKey);
     }
 
     function updateSaveState() {
@@ -1307,6 +1407,48 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
       el.addNotice.classList.add('warning', 'visible');
     }
 
+    function proxyElement(prefix, name) { return document.getElementById(prefix + 'Proxy' + name); }
+    function updateProxyVisibility(prefix, tool) {
+      proxyElement(prefix, '').hidden = tool !== 'claude';
+      if (tool !== 'claude') proxyElement(prefix, 'Mode').value = 'direct';
+      proxyElement(prefix, 'Options').hidden = proxyElement(prefix, 'Mode').value !== 'proxy';
+    }
+    function setProxyConfig(prefix, config) {
+      config = config || { mode: 'direct', preset: 'justdowork' };
+      proxyElement(prefix, 'Mode').value = config.mode;
+      proxyElement(prefix, 'Preset').value = config.preset;
+      const values = Object.assign({}, proxyPresets[config.preset], config.overrides || {});
+      for (const key of Object.keys(values)) {
+        const field = proxyElement(prefix, key);
+        if (!field) continue;
+        if (field.type === 'checkbox') field.checked = values[key];
+        else field.value = typeof values[key] === 'object' ? JSON.stringify(values[key], null, 2) : String(values[key]);
+      }
+      updateProxyVisibility(prefix, prefix === 'add' ? el.tool.value : configEditorTool);
+    }
+    function getProxyConfig(prefix) {
+      const preset = proxyElement(prefix, 'Preset').value;
+      const defaults = proxyPresets[preset], overrides = {};
+      for (const key of Object.keys(defaults)) {
+        const field = proxyElement(prefix, key);
+        if (!field) continue;
+        let value;
+        if (field.type === 'checkbox') value = field.checked;
+        else if (typeof defaults[key] === 'number') value = Number(field.value);
+        else if (typeof defaults[key] === 'object') {
+          try { value = JSON.parse(field.value); } catch { throw new Error('Invalid JSON in proxy setting: ' + key); }
+        } else value = field.value;
+        if (JSON.stringify(value) !== JSON.stringify(defaults[key])) overrides[key] = value;
+      }
+      return { mode: proxyElement(prefix, 'Mode').value, preset, overrides };
+    }
+    for (const prefix of ['add', 'edit']) {
+      proxyElement(prefix, 'Mode').addEventListener('change', () => updateProxyVisibility(prefix, prefix === 'add' ? el.tool.value : configEditorTool));
+      const reset = () => setProxyConfig(prefix, { mode: proxyElement(prefix, 'Mode').value, preset: proxyElement(prefix, 'Preset').value, overrides: {} });
+      proxyElement(prefix, 'Preset').addEventListener('change', reset);
+      proxyElement(prefix, 'Reset').addEventListener('click', reset);
+      setProxyConfig(prefix);
+    }
     updateAddMode();
     resetModels();
     post({ type: 'ready' });
@@ -1325,12 +1467,48 @@ function getNonce(): string {
   return nonce;
 }
 
+function renderProxyFields(prefix: string): string {
+  const id = (name: string) => `${prefix}Proxy${name}`;
+  const numbers = [
+    ['timeoutMs', 'Request timeout (ms)', 1000, 900000], ['maxAttempts', 'Maximum attempts', 1, 5],
+    ['keepAliveMs', 'Keepalive interval (ms)', 100, 60000], ['maxHistoryChars', 'History character budget (0 = unlimited)', 0, ''],
+    ['maxToolResultChars', 'Tool result characters (0 = unlimited)', 0, ''], ['maxOutputTokens', 'Output token cap (0 = client limit)', 0, ''],
+    ['toolDescriptionChars', 'Tool description characters (0 = full)', 0, ''], ['extraThinkingBudget', 'Extra thinking tokens (0 = follow client)', 0, ''],
+    ['maxThinkingBudget', 'Thinking token cap (0 = client limit)', 0, ''], ['webSearchResults', 'Web search result count', 1, 10],
+    ['webFetchMaxChars', 'Web fetch characters (0 = unlimited)', 0, ''], ['maxWebIterations', 'Maximum web tool rounds', 1, 5]
+  ];
+  const flags = [
+    ['rebuildStream', 'Rebuild the response stream'], ['toolInjection', 'Use text protocol for unmapped tools'],
+    ['repairToolJson', 'Repair malformed tool JSON'], ['cacheSystemPrefix', 'Add a system cache breakpoint'],
+    ['webTools', 'Let the proxy execute web search / fetch']
+  ];
+  return `<div id="${id('')}" class="proxySettings">
+    <div class="field"><label for="${id('Mode')}">Connection mode</label><select id="${id('Mode')}"><option value="direct">Direct connection</option><option value="proxy">Built-in proxy</option></select></div>
+    <div id="${id('Options')}" class="proxyOptions" hidden>
+      <div class="field"><label for="${id('Preset')}">Compatibility preset</label><select id="${id('Preset')}"><option value="justdowork">justdowork</option><option value="custom">Custom Anthropic</option></select></div>
+      <div class="small">Enter the real upstream URL and key above. The local endpoint is generated on Apply. Keep this VS Code window open while using the proxy.</div>
+      <details><summary>Advanced proxy settings</summary><div class="field">
+        <button id="${id('Reset')}" type="button">Restore preset defaults</button>
+        <label for="${id('messagesPath')}">Messages API path</label><input id="${id('messagesPath')}" type="text">
+        <label for="${id('authMode')}">Upstream authentication</label><select id="${id('authMode')}"><option value="both">Bearer + x-api-key</option><option value="bearer">Bearer</option><option value="x-api-key">x-api-key</option><option value="custom">Custom header</option></select>
+        <label for="${id('authHeader')}">Custom authentication header name (key comes from SecretStorage)</label><input id="${id('authHeader')}" type="text">
+        ${['headers', 'parameters', 'nativeToolMap'].map(name => `<label for="${id(name)}">${name === 'headers' ? 'Additional headers (JSON, no credentials)' : name === 'parameters' ? 'Additional request parameters (JSON)' : 'Native tool name map (JSON)'}</label><textarea id="${id(name)}" spellcheck="false"></textarea>`).join('')}
+        ${flags.map(([name, label]) => `<label class="check"><input id="${id(name)}" type="checkbox"> ${label}</label>`).join('')}
+        ${numbers.map(([name, label, min, max]) => `<label for="${id(String(name))}">${label}</label><input id="${id(String(name))}" type="number" min="${min}" ${max !== '' ? `max="${max}"` : ''} step="1">`).join('')}
+        <div class="small">Overrides apply only to this provider. History/tool-output limits may omit context; omissions are marked. Stream rebuilding is required for tool mapping and proxy web tools.</div>
+      </div></details>
+    </div>
+  </div>`;
+}
+
 export async function toSidebarSummary(
   provider: ProviderProfile,
   hasSecret: (provider: ProviderProfile) => Promise<boolean>,
   networkTest?: NetworkTestResult,
   usageResult?: UsageQueryResult,
-  compatibility?: CompatibilityResult
+  compatibility?: CompatibilityResult,
+  proxyRuntime?: ProxyRuntime,
+  needsApply?: boolean
 ): Promise<SidebarProviderSummary> {
   return {
     id: provider.id,
@@ -1343,7 +1521,8 @@ export async function toSidebarSummary(
     networkTest,
     usageResult,
     usageEnabled: provider.usageQuery?.enabled === true,
-    compatibility
+    compatibility,
+    proxy: provider.proxy, proxyRuntime, needsApply, codexMode: provider.codexMode
   };
 }
 

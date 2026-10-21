@@ -2,10 +2,10 @@
   "name": "vscodemodelswitch",
   "displayName": "VSCodeModelSwitch",
   "description": "AI CLI provider switcher for Claude Code and Codex in VSCode.",
-  "version": "0.1.0",
+  "version": "0.3.3",
   "publisher": "xinzhaodc",
   "icon": "media/switch_889728.png",
-  "license": "MIT",
+  "license": "SEE LICENSE IN THIRD_PARTY_NOTICES.md",
   "repository": {
     "type": "git",
     "url": "git+ssh://git@github.com/XinZhaoDC/VSCodeModelSwitch.git"
@@ -134,7 +134,9 @@
     "watch": "tsc -watch -p .",
     "check": "tsc -p . --noEmit",
     "mock:models": "node scripts/mock-model-server.js",
-    "package": "vsce package"
+    "package": "vsce package",
+    "test:proxy": "npm run compile && node scripts/test-proxy.js",
+    "test:codex-modes": "npm run compile && node scripts/test-codex-modes.js"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
@@ -142,5 +144,8 @@
     "@vscode/test-electron": "^2.5.2",
     "@vscode/vsce": "^3.6.0",
     "typescript": "^5.9.0"
-  }
+  },
+  "extensionKind": [
+    "workspace"
+  ]
 }

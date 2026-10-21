@@ -10,7 +10,7 @@ VSCodeModelSwitch 是一个面向 VSCode 的 Claude Code 和 Codex provider 管�
 - provider 元数据可以通过 VSCode 账号同步；API key 保持本机存储。
 - 支持导入、导出，避免多台机器混用配置。
 
-第一版只支持 Claude Code 和 Codex，不做本地代理，不做其他 AI CLI。
+支持 Claude Code 和 Codex；Claude Provider 可选择 TypeScript 原生内置代理，Codex 仍直接连接。代理与插件运行在同一扩展宿主，不需要 Python。
 
 ## 核心原则
 
@@ -20,6 +20,11 @@ VSCodeModelSwitch 是一个面向 VSCode 的 Claude Code 和 Codex provider 管�
 4. 默认写入 CLI 配置文件，同时更新 VSCode terminal 环境变量。
 5. key 不进入 VSCode settings、workspace settings 或普通导出文件。
 6. Apply 写入前备份，并用保存的完整模板替换目标配置文件。
+7. Provider 的 proxy 元数据保存连接模式、兼容预设及差异覆盖；默认直接连接。模板描述上游，Apply 才生成 localhost 客户端副本。
+8. Save 不改变已运行代理；Verify 使用临时路由。每个 Provider 独立入口，本地运行不等于模型请求成功。
+9. Codex 的模式切换属于工具级操作，不属于 Provider 配置字段。Codex Enabled 时显示 `Apply Official` 和 `Apply API` 两个单选操作；两者都会清空 `config.toml` 与 `auth.json`。官方模式随后要求 Codex 重新登录；API 模式再按当前 API Provider 的方式写入配置。API Provider 的 Config 编辑流程与 Claude Code 一致。
+
+代理的 UI、选项和生命周期见 [native-proxy.md](native-proxy.md)。
 
 ## Provider 数据模型
 

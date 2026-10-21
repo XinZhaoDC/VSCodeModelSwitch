@@ -26,6 +26,13 @@ Apply 之前保存在 VS Code SecretStorage 中。
 - 提供按需网络检查、真实模型协议验证和可选额度查询。
 - 导入和导出会清除 API key；SecretStorage 不参与导出。
 - 显示日志、Claude 备份、Codex 备份大小并提供范围明确的删除按钮。
+- Claude Provider 可选择 TypeScript 原生内置代理，无需 Python；提供 justdowork 预设和自定义 Anthropic 设置。
+- 添加及已有 Provider 的 Config 均可编辑代理；Save 后提示 Pending Apply，Apply 才更新实际连接。
+- 单独显示本地代理状态和上游请求结果；支持代理详情、停止/重启与日志。
+- 内置代理上游请求使用扩展宿主的全局 fetch，与插件 Network 检查共享 VS Code Server 的 host proxy 出口。
+- Codex 区域在 Enabled 时提供“Apply Official”和“Apply API”两个单选操作：两者都会先清空 `config.toml` 与 `auth.json`；官方模式随后重新登录，API 模式再写入当前 API Provider 配置。Codex API Provider 的 Config 编辑方式与 Claude Code 一致。
+
+原生代理的字段、使用方式、窗口生命周期及验收边界见 [说明](docs/native-proxy.md)。适配模块沿用上游 PolyForm Noncommercial 许可，见 [第三方许可](THIRD_PARTY_NOTICES.md)。
 
 ## 要求与 VSIX 安装
 

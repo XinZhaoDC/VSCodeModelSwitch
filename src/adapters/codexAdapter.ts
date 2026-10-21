@@ -1,7 +1,7 @@
 import * as fs from 'fs/promises';
 import { atomicWrite, backupFile, pathExists } from '../config/atomicWrite';
 import { getTopLevelStringValue, setSectionValue, setTopLevelValue } from '../config/tomlEdit';
-import { ResolvedProvider } from '../types';
+import { CodexMode, ResolvedProvider } from '../types';
 import { resolveHomePath } from '../utils/paths';
 
 export class CodexAdapter {
@@ -10,10 +10,21 @@ export class CodexAdapter {
       return;
     }
 
-    const configPath = resolveHomePath('.codex', 'config.toml');
+    if (resolved.codex.mode === 'official') {
+      await this.applyOfficialMode();
+      return;
+    }
+    const configPath = this.getConfigPath();
+    const authPath = this.getAuthPath();
     const content = setSectionValue(resolved.codex.configText, 'model_providers.OpenAI', 'experimental_bearer_token', resolved.codex.key);
 
     await backupFile(configPath);
+    await backupFile(authPath);
+    // API mode starts from a clean Codex auth state. The API config is written
+    // after both files have been cleared so an old official login cannot leak
+    // into API mode.
+    await atomicWrite(configPath, '');
+    await atomicWrite(authPath, '');
     await atomicWrite(configPath, content);
   }
 
@@ -21,10 +32,34 @@ export class CodexAdapter {
     return resolveHomePath('.codex', 'config.toml');
   }
 
-  async readActiveConfig(): Promise<{ baseUrl?: string; model?: string; providerId?: string; key?: string }> {
+  getAuthPath(): string { return resolveHomePath('.codex', 'auth.json'); }
+
+  async applyOfficialMode(): Promise<void> {
+    const configPath = this.getConfigPath();
+    const authPath = this.getAuthPath();
+    await backupFile(configPath);
+    await backupFile(authPath);
+    await atomicWrite(configPath, '');
+    await atomicWrite(authPath, '');
+  }
+
+  async readMode(): Promise<CodexMode | 'unknown'> {
+    const configPath = this.getConfigPath();
+    const authPath = this.getAuthPath();
+    const config = await pathExists(configPath) ? await fs.readFile(configPath, 'utf8') : '';
+    const auth = await pathExists(authPath) ? await fs.readFile(authPath, 'utf8') : '';
+    const provider = getTopLevelStringValue(config, 'model_provider');
+    const key = provider ? getSectionStringValue(config, `model_providers.${provider}`, 'experimental_bearer_token') : undefined;
+    const base = provider ? getSectionStringValue(config, `model_providers.${provider}`, 'base_url') : undefined;
+    if (key && base) return 'api';
+    if (!config.trim() && !auth.trim()) return 'official';
+    return 'unknown';
+  }
+
+  async readActiveConfig(): Promise<{ baseUrl?: string; model?: string; providerId?: string; key?: string; mode?: CodexMode | 'unknown' }> {
     const configPath = this.getConfigPath();
     if (!(await pathExists(configPath))) {
-      return {};
+      return { mode: await this.readMode() };
     }
 
     const content = await fs.readFile(configPath, 'utf8');
@@ -35,7 +70,8 @@ export class CodexAdapter {
       providerId,
       model,
       baseUrl,
-      key: providerId ? getSectionStringValue(content, `model_providers.${providerId}`, 'experimental_bearer_token') : undefined
+      key: providerId ? getSectionStringValue(content, `model_providers.${providerId}`, 'experimental_bearer_token') : undefined,
+      mode: await this.readMode()
     };
   }
 }

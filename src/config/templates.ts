@@ -67,6 +67,7 @@ export function redactConfigText(tool: ToolId, text: string): string {
     const env = parsed.env && typeof parsed.env === 'object' && !Array.isArray(parsed.env)
       ? parsed.env as Record<string, unknown> : {};
     env.ANTHROPIC_AUTH_TOKEN = '';
+    if ('ANTHROPIC_API_KEY' in env) env.ANTHROPIC_API_KEY = '';
     parsed.env = env;
     return `${JSON.stringify(parsed, null, 2)}\n`;
   }
@@ -81,7 +82,7 @@ export function extractConfigValues(tool: ToolId, text: string): { baseUrl: stri
     return {
       baseUrl: typeof env.ANTHROPIC_BASE_URL === 'string' ? env.ANTHROPIC_BASE_URL.trim() : '',
       model: typeof parsed.model === 'string' ? parsed.model.trim() : '',
-      key: typeof env.ANTHROPIC_AUTH_TOKEN === 'string' ? env.ANTHROPIC_AUTH_TOKEN.trim() : ''
+      key: typeof env.ANTHROPIC_AUTH_TOKEN === 'string' && env.ANTHROPIC_AUTH_TOKEN.trim() ? env.ANTHROPIC_AUTH_TOKEN.trim() : typeof env.ANTHROPIC_API_KEY === 'string' ? env.ANTHROPIC_API_KEY.trim() : ''
     };
   }
   const baseUrl = getTomlSectionValue(text, 'model_providers.OpenAI', 'base_url');

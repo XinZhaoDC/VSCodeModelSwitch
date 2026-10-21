@@ -9,7 +9,7 @@ export class ModelResolver {
   constructor(private readonly store: ProviderStore) {}
 
   async refresh(tool: ToolId, config: ToolEndpointConfig | ProviderProfile, key: string): Promise<ModelInfo[]> {
-    const models = await fetchModels(tool, config.baseUrl, key);
+    const models = await fetchModels(tool, config.baseUrl, key, undefined, config.proxy);
     await this.store.saveModelCache({
       tool,
       baseUrl: config.baseUrl,

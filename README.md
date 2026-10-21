@@ -1,5 +1,20 @@
 # VSCodeModelSwitch
 
+Claude providers now support a native TypeScript **Built-in proxy** with a
+justdowork preset and per-provider advanced overrides. Configure it in Add
+Provider or an existing provider's Config editor; Save retains upstream
+configuration, and Apply generates the local client endpoint. No Python is
+required. Local running state and upstream model failures are shown separately.
+The proxy's outbound requests use the VS Code extension host's global `fetch`,
+so its host-proxy route matches the plugin's Network checks.
+The Codex section exposes two Enabled-mode radio actions: **Apply Official**
+and **Apply API**. Both clear `config.toml` and `auth.json`; Official mode then
+requires a new login, while API mode writes the selected API provider. Codex
+API provider configuration follows the same editor flow as Claude Code.
+
+See [native proxy usage and lifecycle](docs/native-proxy.md) and
+[third-party license notices](THIRD_PARTY_NOTICES.md).
+
 English | [简体中文](README.zh-CN.md)
 
 VSCodeModelSwitch is a VS Code extension for maintaining and switching Claude
