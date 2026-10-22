@@ -7,7 +7,7 @@ import { ProxyOptions } from '../types';
 export type Json = Record<string, any>;
 
 export const WEB_NAMES = new Set(['WebSearch', 'WebFetch', 'web_search', 'web_fetch', 'fetch_image']);
-const WEB_TOOLS = [
+export const WEB_TOOLS = [
   { name: 'WebSearch', description: 'Search the web for information.', input_schema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } },
   { name: 'WebFetch', description: 'Read text from a web page.', input_schema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] } },
   { name: 'fetch_image', description: 'Fetch an image by URL.', input_schema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] } }

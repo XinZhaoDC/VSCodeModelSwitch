@@ -39,6 +39,7 @@ export interface ProviderProfile {
 export interface ProxyConfig {
   mode: 'direct' | 'proxy';
   preset: 'justdowork' | 'custom';
+  apiFormat?: 'anthropic' | 'responses';
   overrides?: Partial<ProxyOptions>;
 }
 
@@ -183,6 +184,7 @@ export interface ResolvedProvider {
     wireApi: 'responses' | 'chat';
     configText: string;
     mode: CodexMode;
+    proxy?: boolean;
   };
   missingSecrets: ToolId[];
   degraded: string[];
@@ -195,10 +197,11 @@ export interface StatusState {
   detail?: string;
 }
 
-export type ApiStatusKind = 'off' | 'unactivated' | 'ready' | 'missingKey' | 'modelsStale' | 'degraded' | 'networkError';
+export type ApiStatusKind = 'off' | 'unactivated' | 'ready' | 'missingKey' | 'modelsStale' | 'degraded' | 'networkError' | 'signedIn' | 'loginRequired';
 
 export interface ApiStatusRow {
   tool: ToolId;
+  mode: CodexMode | 'unknown';
   providerName?: string;
   model?: string;
   status: ApiStatusKind;
@@ -206,6 +209,7 @@ export interface ApiStatusRow {
 
 export interface ToolRuntimeState {
   tool: ToolId;
+  mode?: CodexMode | 'unknown';
   providerName?: string;
   baseUrl?: string;
   model?: string;

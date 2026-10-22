@@ -1,6 +1,6 @@
 import * as fs from 'fs/promises';
 import { atomicWrite, backupFile, pathExists } from '../config/atomicWrite';
-import { getTopLevelStringValue, setSectionValue, setTopLevelValue } from '../config/tomlEdit';
+import { getTopLevelStringValue, setSectionValue } from '../config/tomlEdit';
 import { CodexMode, ResolvedProvider } from '../types';
 import { resolveHomePath } from '../utils/paths';
 
@@ -44,34 +44,38 @@ export class CodexAdapter {
   }
 
   async readMode(): Promise<CodexMode | 'unknown'> {
-    const configPath = this.getConfigPath();
-    const authPath = this.getAuthPath();
-    const config = await pathExists(configPath) ? await fs.readFile(configPath, 'utf8') : '';
-    const auth = await pathExists(authPath) ? await fs.readFile(authPath, 'utf8') : '';
-    const provider = getTopLevelStringValue(config, 'model_provider');
-    const key = provider ? getSectionStringValue(config, `model_providers.${provider}`, 'experimental_bearer_token') : undefined;
-    const base = provider ? getSectionStringValue(config, `model_providers.${provider}`, 'base_url') : undefined;
-    if (key && base) return 'api';
-    if (!config.trim() && !auth.trim()) return 'official';
-    return 'unknown';
+    return (await this.readActiveConfig()).mode;
   }
 
-  async readActiveConfig(): Promise<{ baseUrl?: string; model?: string; providerId?: string; key?: string; mode?: CodexMode | 'unknown' }> {
-    const configPath = this.getConfigPath();
-    if (!(await pathExists(configPath))) {
-      return { mode: await this.readMode() };
+  async readActiveConfig(): Promise<{ baseUrl?: string; model?: string; providerId?: string; key?: string; mode: CodexMode | 'unknown'; officialLoggedIn: boolean }> {
+    const read = async (file: string) => await pathExists(file) ? fs.readFile(file, 'utf8') : '';
+    const [content, authText] = await Promise.all([read(this.getConfigPath()), read(this.getAuthPath())]);
+    let auth: { auth_mode?: string; OPENAI_API_KEY?: string; tokens?: { access_token?: string; id_token?: string } } = {};
+    let invalidAuth = false;
+    if (authText.trim()) {
+      try {
+        const value = JSON.parse(authText);
+        if (!value || typeof value !== 'object' || Array.isArray(value)) invalidAuth = true;
+        else auth = value;
+      } catch { invalidAuth = true; }
     }
-
-    const content = await fs.readFile(configPath, 'utf8');
     const providerId = getTopLevelStringValue(content, 'model_provider');
     const model = getTopLevelStringValue(content, 'model');
     const baseUrl = providerId ? getSectionStringValue(content, `model_providers.${providerId}`, 'base_url') : undefined;
+    const key = providerId ? getSectionStringValue(content, `model_providers.${providerId}`, 'experimental_bearer_token') : undefined;
+    const hasOfficialTokens = [auth.tokens?.access_token, auth.tokens?.id_token].some(value => typeof value === 'string' && Boolean(value.trim()));
+    const hasApiKey = typeof auth.OPENAI_API_KEY === 'string' && Boolean(auth.OPENAI_API_KEY.trim());
+    // A selected custom endpoint remains API mode even if its key is missing.
+    // Official login and ordinary TOML settings do not need a saved provider.
+    const customProvider = Boolean(providerId && providerId !== 'openai');
+    const mode = baseUrl || customProvider || hasApiKey ? 'api' : invalidAuth ? 'unknown' : 'official';
     return {
       providerId,
       model,
       baseUrl,
-      key: providerId ? getSectionStringValue(content, `model_providers.${providerId}`, 'experimental_bearer_token') : undefined,
-      mode: await this.readMode()
+      key,
+      mode,
+      officialLoggedIn: mode === 'official' && hasOfficialTokens
     };
   }
 }

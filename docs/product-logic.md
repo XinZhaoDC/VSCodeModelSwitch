@@ -10,7 +10,7 @@ VSCodeModelSwitch 是一个面向 VSCode 的 Claude Code 和 Codex provider 管�
 - provider 元数据可以通过 VSCode 账号同步；API key 保持本机存储。
 - 支持导入、导出，避免多台机器混用配置。
 
-支持 Claude Code 和 Codex；Claude Provider 可选择 TypeScript 原生内置代理，Codex 仍直接连接。代理与插件运行在同一扩展宿主，不需要 Python。
+支持 Claude Code 和 Codex；两者的 API Provider 都可选择直接连接或 TypeScript 原生内置代理。Codex 代理可使用原生 OpenAI Responses，或显式选择 Anthropic Messages 上游并转换协议。代理与插件运行在同一扩展宿主，不需要 Python。
 
 ## 核心原则
 
@@ -22,7 +22,9 @@ VSCodeModelSwitch 是一个面向 VSCode 的 Claude Code 和 Codex provider 管�
 6. Apply 写入前备份，并用保存的完整模板替换目标配置文件。
 7. Provider 的 proxy 元数据保存连接模式、兼容预设及差异覆盖；默认直接连接。模板描述上游，Apply 才生成 localhost 客户端副本。
 8. Save 不改变已运行代理；Verify 使用临时路由。每个 Provider 独立入口，本地运行不等于模型请求成功。
-9. Codex 的模式切换属于工具级操作，不属于 Provider 配置字段。Codex Enabled 时显示 `Apply Official` 和 `Apply API` 两个单选操作；两者都会清空 `config.toml` 与 `auth.json`。官方模式随后要求 Codex 重新登录；API 模式再按当前 API Provider 的方式写入配置。API Provider 的 Config 编辑流程与 Claude Code 一致。
+9. Codex 模式属于工具级操作。界面显示 Current mode，提供 `Use Official Account` 和 `Apply API Provider` 按钮；切换时清空 `config.toml` 与 `auth.json`，官方模式随后重新登录，API 模式写入所选源。已在官方模式时禁用官方按钮，保留当前登录；API 模式不依赖之前存在 active provider。
+10. 顶部状态采用 Tool / Mode / Provider Name / Model ID / Status。官方账号无需创建 Provider：本地有登录凭据时显示 Signed in，否则 Login required；未指定模型显示 Client default。该状态不验证远端登录有效期。
+11. 两种工具分别保存已应用代理快照和 SecretStorage 引用；Save 与临时 Verify 不覆盖已运行路由，重载恢复上次应用的配置。模式切换和当前模式显示只在操作成功后更新。
 
 代理的 UI、选项和生命周期见 [native-proxy.md](native-proxy.md)。
 
@@ -38,6 +40,12 @@ type ProviderProfile = {
   baseUrl: string;
   modelPolicy: ModelPolicy;
   secretRef: string;
+  proxy?: {
+    mode: 'direct' | 'proxy';
+    preset: 'justdowork' | 'custom';
+    apiFormat?: 'anthropic' | 'responses';
+    overrides?: Partial<ProxyOptions>;
+  };
   codex?: {
     providerId: string;
     wireApi: 'responses' | 'chat';
@@ -45,11 +53,13 @@ type ProviderProfile = {
 };
 
 type ModelPolicy =
+  | { type: 'toolDefault' }
+  | { type: 'providerAuto'; preferred?: string }
   | { type: 'fixed'; model: string }
   | { type: 'custom'; model: string };
 ```
 
-第一版保存时使用 `fixed`，来源是模型列表选择；`custom` 只作为后续高级入口。
+字段与策略的完整定义以 `src/types.ts` 为准。API格式决定默认路径、认证和兼容选项；Responses数字思考预算无对应协议字段，需用 `reasoning.effort`，Anthropic桥接支持CC的预算和缓存断点。不可翻译的OpenAI加密状态、hosted工具及会话引用会明确报错。
 
 ## 模型获取逻辑
 
@@ -192,8 +202,8 @@ Claude Code 和 Codex 分开添加，分别展示在各自 provider 分组里。
 ## 切换 Provider 流程
 
 ```text
-Use Provider
-  -> 点击某个非当前 provider 卡片上的 Use
+Apply Provider
+  -> 点击 provider 卡片上的 Apply
   -> 设置该工具当前 provider
   -> 从 SecretStorage 读取 key
   -> 更新 VSCode terminal environmentVariableCollection
@@ -202,7 +212,7 @@ Use Provider
   -> 提示重启已有 Claude/Codex terminal
 ```
 
-当前 provider 卡片只显示 `Active`，不再显示不可点击的 `Selected` 按钮。`Use` 本身就是选择并应用。
+当前 provider 卡片显示 `Active` 标记，并保留 `Apply` 按钮以应用后续保存的配置。
 
 ## 启动扫描
 
@@ -211,9 +221,11 @@ Use Provider
 ```text
 <effective-home>/.claude/settings.json
 <effective-home>/.codex/config.toml
+<effective-home>/.codex/auth.json
 ```
 
 并用规范化 `baseUrl + API key` 匹配已保存 provider。末尾 `/v1` 不影响匹配；模型变化不改变 Provider 身份。
+Codex 官方模式先独立识别模式和本地登录状态，无需匹配API源；自定义上游即使缺key仍属于API模式。受管理localhost地址按Provider ID匹配，并检查代理是否在运行。
 
 默认 `<effective-home>` 是真实用户 home。设置 `vscodemodelswitch.configTarget = sandbox` 后才使用 workspace 下的 `.vscodemodelswitch-home`。
 
@@ -288,7 +300,7 @@ ANTHROPIC_AUTH_TOKEN
 }
 ```
 
-Provider 可以不保存模型；此时界面显示 `NULL`，Apply 保留模板中的空值或省略状态。
+Provider 可以不保存模型；卡片显示 `NULL`，顶部活动模式显示 `Client default`，Apply 保留模板中的空值或省略状态。
 
 ## Codex Adapter
 
@@ -320,6 +332,7 @@ experimental_bearer_token = "..."
 ```
 
 Codex Provider ID 固定为 `OpenAI`；Provider 显示名称只保存在插件元数据中。模型可以为空。
+以上为API模式配置。官方模式沿用Codex自身登录，不生成API Provider配置；官方账号可以没有已保存的Provider。代理模式的Provider模板保留上游信息，只有Apply生成的副本改为localhost与占位key。
 
 ## 同步与导入导出
 
@@ -400,17 +413,15 @@ View Codex Config
 
 在测试模式下路径受 `vscodemodelswitch.testHome` 控制。
 
-## 状态栏状态
+## 顶部状态表
 
 ```text
-AI: ProviderName
-AI: ProviderName (key missing)
-AI: ProviderName (models stale)
-AI: ProviderName (degraded)
-AI: Off
+Tool        Mode              Provider Name     Model ID         Status
+Claude Code API               <provider>        <model>          Ready
+Codex       Official account  Official account  Client default   Signed in
 ```
 
-点击状态栏打开：
+Codex无登录凭据时显示Login required；工具禁用时保留模式信息，Status显示Off。模式无法识别时显示Unknown，不冒充官方或API模式。底部VSCode状态栏的点击菜单提供：
 
 ```text
 Switch Provider
@@ -427,8 +438,8 @@ Export Config
 Claude Code 和 Codex 各自是一个 provider 列表。每个 provider 占一行：
 
 ```text
-Name
-Model                         Use / Active    Model
+Name                           Active (if applied)
+Model                          Apply    Config    Model
 ```
 
 - `Apply`: 选择并立即应用该 provider。
@@ -454,8 +465,8 @@ Codex: <provider or url> / <model>
 状态来源优先级：
 
 1. 读取当前有效配置文件。
-2. 用规范化 `baseUrl + API key` 匹配 VSCodeModelSwitch 保存过的 provider。
-3. 匹配成功显示 provider name，匹配失败显示 URL host 和 model。
+2. Codex官方模式独立显示Official account；API模式用规范化 `baseUrl + API key` 或受管理本地路由匹配已保存provider。
+3. API匹配成功显示provider name，匹配失败显示URL host；模型未知或未指定时显示Client default/Not configured，不替代客户端自身模型选择。
 
 插件会监听配置文件变化，并在配置文件被外部插件或手工编辑更新后刷新状态栏。
 
@@ -485,4 +496,3 @@ Codex: <provider or url> / <model>
 - 加密导出。
 - 配置 diff 预览。
 - cc-switch 配置导入。
-- 本地代理和协议转换。

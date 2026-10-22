@@ -323,9 +323,9 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
       color: var(--vscode-descriptionForeground);
       background: var(--vscode-sideBarSectionHeader-background);
     }
-    .statusGrid { display: grid; grid-template-columns: 0.7fr 1fr 1.3fr 0.8fr; gap: 5px 8px; overflow-x: auto; }
+    .statusGrid { display: grid; grid-template-columns: minmax(54px, 0.7fr) minmax(65px, 0.8fr) minmax(90px, 1fr) minmax(100px, 1.3fr) minmax(80px, 0.9fr); gap: 5px 8px; overflow-x: auto; }
     .statusRows { display: contents; }
-    .statusGrid > div { min-width: 0; overflow-wrap: anywhere; }
+    .statusGrid > div, .statusRows > div { min-width: 0; overflow-wrap: anywhere; }
     .statusHead { font-weight: 650; color: var(--vscode-sideBar-foreground); }
     .syncStatus { margin-top: 7px; color: var(--vscode-descriptionForeground); }
     .toolSwitch { display: flex; align-items: center; gap: 5px; font-size: 12px; }
@@ -477,9 +477,8 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
     }
     .check { display: flex; align-items: center; gap: 7px; color: var(--vscode-sideBar-foreground); font-size: 12px; }
     .check input { width: auto; min-height: auto; margin: 0; }
-    .modeOptions { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 8px; }
-    .modeOption { display: flex; align-items: center; gap: 6px; color: var(--vscode-sideBar-foreground); font-size: 12px; }
-    .modeOption input { width: auto; min-height: auto; margin: 0; }
+    .modeCurrent { font-weight: 650; color: var(--vscode-sideBar-foreground); }
+    .modeActions { display: grid; grid-template-columns: repeat(auto-fit, minmax(135px, 1fr)); gap: 8px; }
     .proxySettings { display: flex; flex-direction: column; gap: 7px; }
     .proxySettings[hidden], .proxyOptions[hidden] { display: none; }
     .proxyOptions { display: flex; flex-direction: column; gap: 7px; }
@@ -504,7 +503,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
     </div>
     <div id="status" class="status">
       <div class="statusGrid">
-        <div class="statusHead">API</div><div class="statusHead">Provider Name</div><div class="statusHead">Model ID</div><div class="statusHead">Status</div>
+        <div class="statusHead">Tool</div><div class="statusHead">Mode</div><div class="statusHead">Provider Name</div><div class="statusHead">Model ID</div><div class="statusHead">Status</div>
         <div id="statusRows" class="statusRows">Loading...</div>
       </div>
       <div id="syncStatus" class="syncStatus"></div>
@@ -595,10 +594,11 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
       </div>
       <div id="codexToolPanel" class="panel">
         <div class="field">
-          <label>Codex mode</label>
-          <div class="modeOptions">
-            <label class="modeOption"><input id="codexOfficialMode" type="radio" name="codexApplyMode" value="official"> Apply Official</label>
-            <label class="modeOption"><input id="codexApiMode" type="radio" name="codexApplyMode" value="api"> Apply API</label>
+          <div id="codexCurrentMode" class="modeCurrent" role="status" aria-live="polite">Current mode: Checking…</div>
+          <div id="codexModeDetail" class="small"></div>
+          <div class="modeActions">
+            <button id="codexOfficialMode" type="button">Use Official Account</button>
+            <button id="codexApiMode" type="button">Apply API Provider</button>
           </div>
           <div class="small">Both actions clear config.toml and auth.json first. Official mode then requires Codex login; API mode applies the selected API provider.</div>
         </div>
@@ -672,7 +672,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
 
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
-    const proxyPresets = ${JSON.stringify({ justdowork: proxyDefaults('justdowork'), custom: proxyDefaults('custom') })};
+    const proxyPresets = ${JSON.stringify({ anthropic: { justdowork: proxyDefaults('justdowork'), custom: proxyDefaults('custom') }, responses: { justdowork: proxyDefaults('justdowork', 'responses'), custom: proxyDefaults('custom', 'responses') } })};
     let state = {
       providers: [],
       currentProviderIds: {},
@@ -748,6 +748,8 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
       configEditorTool: document.getElementById('configEditorTool'),
       codexOfficialMode: document.getElementById('codexOfficialMode'),
       codexApiMode: document.getElementById('codexApiMode'),
+      codexCurrentMode: document.getElementById('codexCurrentMode'),
+      codexModeDetail: document.getElementById('codexModeDetail'),
       configText: document.getElementById('configText'),
       configKey: document.getElementById('configKey'),
       usageEnabled: document.getElementById('usageEnabled'),
@@ -856,10 +858,10 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
     el.clearLogButton.addEventListener('click', () => post({ type: 'clearLog' }));
     el.deleteClaudeBackupsButton.addEventListener('click', () => post({ type: 'deleteBackups', tool: 'claude' }));
     el.deleteCodexBackupsButton.addEventListener('click', () => post({ type: 'deleteBackups', tool: 'codex' }));
-    el.codexOfficialMode.addEventListener('change', () => { if (el.codexOfficialMode.checked) post({ type: 'applyCodexMode', mode: 'official' }); });
-    el.codexApiMode.addEventListener('change', () => { if (el.codexApiMode.checked) post({ type: 'applyCodexMode', mode: 'api' }); });
+    el.codexOfficialMode.addEventListener('click', () => post({ type: 'applyCodexMode', mode: 'official' }));
+    el.codexApiMode.addEventListener('click', () => post({ type: 'applyCodexMode', mode: 'api' }));
     el.addMode.addEventListener('change', updateAddMode);
-    el.tool.addEventListener('change', () => { resetModels(); updateAddMode(); });
+    el.tool.addEventListener('change', () => { resetModels(); setProxyConfig('add'); updateAddMode(); });
     el.addConfigText.addEventListener('input', updateSaveState);
     el.saveConfigButton.addEventListener('click', () => {
       try { post({ type: 'saveProviderConfig', providerId: configEditorProviderId, text: el.configText.value, key: el.configKey.value, usageQuery: getUsageQuery(), usageAccessToken: el.usageAccessToken.value, proxy: getProxyConfig('edit') }); }
@@ -898,8 +900,12 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
       el.codexPath.textContent = 'Config: ' + state.configPaths.codex;
       el.claudeEnabled.checked = state.toolEnabled.claude;
       el.codexEnabled.checked = state.toolEnabled.codex;
-      el.codexOfficialMode.checked = state.codexMode === 'official';
-      el.codexApiMode.checked = state.codexMode === 'api';
+      el.codexCurrentMode.textContent = 'Current mode: ' + labelMode(state.codexMode);
+      const codexStatus = state.apiStatuses.find(row => row.tool === 'codex');
+      el.codexModeDetail.textContent = state.codexMode === 'official'
+        ? codexStatus && codexStatus.status === 'loginRequired' ? 'Official mode is selected. Sign in from the Codex client.' : 'Uses Codex sign-in. Model selection follows the Codex client.'
+        : state.codexMode === 'api' ? 'Uses the applied API provider configuration. Saved edits take effect after Apply.'
+        : 'Mode could not be determined. Reload Status or apply a mode below.';
       el.claudeSection.classList.toggle('toolDisabled', !state.toolEnabled.claude);
       el.codexSection.classList.toggle('toolDisabled', !state.toolEnabled.codex);
       applyCollapseState();
@@ -911,11 +917,12 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
     function renderStatus() {
       el.statusRows.textContent = '';
       for (const row of state.apiStatuses) {
-        const api = document.createElement('div'); api.textContent = labelTool(row.tool);
-        const provider = document.createElement('div'); provider.textContent = row.providerName || 'NULL';
-        const model = document.createElement('div'); model.textContent = row.model || 'NULL';
+        const tool = document.createElement('div'); tool.textContent = labelTool(row.tool);
+        const mode = document.createElement('div'); mode.textContent = labelMode(row.mode);
+        const provider = document.createElement('div'); provider.textContent = row.providerName || (row.mode === 'official' ? 'Official account' : 'Not configured');
+        const model = document.createElement('div'); model.textContent = row.model || (row.mode === 'official' || row.mode === 'api' ? 'Client default' : '—');
         const status = document.createElement('div'); status.textContent = labelStatus(row.status);
-        el.statusRows.append(api, provider, model, status);
+        el.statusRows.append(tool, mode, provider, model, status);
       }
       el.syncStatus.textContent = state.globalCliSync ? 'Config sync: ' + state.configTarget : 'Config sync: Off';
       const sizes = state.storageSizes || { logBytes: 0, backupBytes: 0, claudeBackupBytes: 0, codexBackupBytes: 0 };
@@ -981,10 +988,10 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
         }
         const connection = document.createElement('div');
         connection.className = 'providerModel';
-        connection.textContent = provider.tool === 'codex'
-          ? 'Connection: Codex ' + (provider.codexMode === 'official' ? 'Official account' : 'API source')
+        connection.textContent = provider.codexMode === 'official'
+          ? 'Connection: Codex Official account'
           : provider.proxy && provider.proxy.mode === 'proxy'
-          ? 'Connection: Built-in proxy · ' + provider.proxy.preset + (Object.keys(provider.proxy.overrides || {}).length ? ' · Customized' : '')
+          ? 'Connection: Built-in proxy · ' + (provider.proxy.apiFormat === 'responses' ? 'Responses · ' : '') + provider.proxy.preset + (Object.keys(provider.proxy.overrides || {}).length ? ' · Customized' : '')
           : 'Connection: Direct';
         meta.appendChild(connection);
         if (provider.needsApply) {
@@ -1270,7 +1277,8 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
       el.testCodexNetworkButton.disabled = busy || !state.toolEnabled.codex || state.codexMode === 'official';
       el.deleteClaudeBackupsButton.disabled = busy || !state.toolEnabled.claude;
       el.deleteCodexBackupsButton.disabled = busy || !state.toolEnabled.codex;
-      el.codexOfficialMode.disabled = busy || !state.toolEnabled.codex;
+      el.codexOfficialMode.disabled = busy || !state.toolEnabled.codex || state.codexMode === 'official';
+      el.codexOfficialMode.title = state.codexMode === 'official' ? 'Official mode is already active; your login is kept.' : 'Switch to official mode, clear the current Codex configuration and sign in again.';
       el.codexApiMode.disabled = busy || !state.toolEnabled.codex || !state.providers.some((provider) => provider.tool === 'codex' && provider.codexMode !== 'official' && provider.hasKey);
     }
 
@@ -1309,6 +1317,8 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
     }
 
     function labelStatus(kind) {
+      if (kind === 'signedIn') return 'Signed in';
+      if (kind === 'loginRequired') return 'Login required';
       if (kind === 'unactivated') return 'Unactivated';
       if (kind === 'networkError') return 'Network error';
       if (kind === 'missingKey') return 'Key missing';
@@ -1316,6 +1326,10 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
       if (kind === 'degraded') return 'Degraded';
       if (kind === 'ready') return 'Ready';
       return 'Off';
+    }
+
+    function labelMode(mode) {
+      return mode === 'official' ? 'Official account' : mode === 'api' ? 'API' : 'Unknown';
     }
 
     function formatNetwork(result) {
@@ -1409,15 +1423,22 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
 
     function proxyElement(prefix, name) { return document.getElementById(prefix + 'Proxy' + name); }
     function updateProxyVisibility(prefix, tool) {
-      proxyElement(prefix, '').hidden = tool !== 'claude';
-      if (tool !== 'claude') proxyElement(prefix, 'Mode').value = 'direct';
+      proxyElement(prefix, '').hidden = false;
+      proxyElement(prefix, 'ApiFormatField').hidden = tool !== 'codex';
+      if (tool !== 'codex') proxyElement(prefix, 'ApiFormat').value = 'anthropic';
+      const responses = proxyElement(prefix, 'ApiFormat').value === 'responses';
+      proxyElement(prefix, 'ResponsesNote').hidden = !responses;
+      for (const name of ['extraThinkingBudget', 'maxThinkingBudget']) proxyElement(prefix, name).disabled = responses;
       proxyElement(prefix, 'Options').hidden = proxyElement(prefix, 'Mode').value !== 'proxy';
     }
     function setProxyConfig(prefix, config) {
+      const tool = prefix === 'add' ? el.tool.value : configEditorTool;
       config = config || { mode: 'direct', preset: 'justdowork' };
       proxyElement(prefix, 'Mode').value = config.mode;
       proxyElement(prefix, 'Preset').value = config.preset;
-      const values = Object.assign({}, proxyPresets[config.preset], config.overrides || {});
+      const apiFormat = config.apiFormat || (tool === 'codex' ? 'responses' : 'anthropic');
+      proxyElement(prefix, 'ApiFormat').value = apiFormat;
+      const values = Object.assign({}, proxyPresets[apiFormat][config.preset], config.overrides || {});
       for (const key of Object.keys(values)) {
         const field = proxyElement(prefix, key);
         if (!field) continue;
@@ -1428,7 +1449,8 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
     }
     function getProxyConfig(prefix) {
       const preset = proxyElement(prefix, 'Preset').value;
-      const defaults = proxyPresets[preset], overrides = {};
+      const apiFormat = proxyElement(prefix, 'ApiFormat').value;
+      const defaults = proxyPresets[apiFormat][preset], overrides = {};
       for (const key of Object.keys(defaults)) {
         const field = proxyElement(prefix, key);
         if (!field) continue;
@@ -1440,11 +1462,12 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
         } else value = field.value;
         if (JSON.stringify(value) !== JSON.stringify(defaults[key])) overrides[key] = value;
       }
-      return { mode: proxyElement(prefix, 'Mode').value, preset, overrides };
+      return { mode: proxyElement(prefix, 'Mode').value, preset, apiFormat, overrides };
     }
     for (const prefix of ['add', 'edit']) {
       proxyElement(prefix, 'Mode').addEventListener('change', () => updateProxyVisibility(prefix, prefix === 'add' ? el.tool.value : configEditorTool));
-      const reset = () => setProxyConfig(prefix, { mode: proxyElement(prefix, 'Mode').value, preset: proxyElement(prefix, 'Preset').value, overrides: {} });
+      const reset = () => setProxyConfig(prefix, { mode: proxyElement(prefix, 'Mode').value, preset: proxyElement(prefix, 'Preset').value, apiFormat: proxyElement(prefix, 'ApiFormat').value, overrides: {} });
+      proxyElement(prefix, 'ApiFormat').addEventListener('change', reset);
       proxyElement(prefix, 'Preset').addEventListener('change', reset);
       proxyElement(prefix, 'Reset').addEventListener('click', reset);
       setProxyConfig(prefix);
@@ -1485,16 +1508,18 @@ function renderProxyFields(prefix: string): string {
   return `<div id="${id('')}" class="proxySettings">
     <div class="field"><label for="${id('Mode')}">Connection mode</label><select id="${id('Mode')}"><option value="direct">Direct connection</option><option value="proxy">Built-in proxy</option></select></div>
     <div id="${id('Options')}" class="proxyOptions" hidden>
-      <div class="field"><label for="${id('Preset')}">Compatibility preset</label><select id="${id('Preset')}"><option value="justdowork">justdowork</option><option value="custom">Custom Anthropic</option></select></div>
+      <div id="${id('ApiFormatField')}" class="field" hidden><label for="${id('ApiFormat')}">Upstream API format</label><select id="${id('ApiFormat')}"><option value="responses">OpenAI Responses</option><option value="anthropic">Anthropic Messages (translate Codex requests)</option></select><div class="small">Choose the API your provider serves. Changing the format restores that format's preset defaults. Anthropic translation needs full history and stream rebuilding; hosted OpenAI tools and encrypted OpenAI state require Responses.</div></div>
+      <div class="field"><label for="${id('Preset')}">Compatibility preset</label><select id="${id('Preset')}"><option value="justdowork">justdowork</option><option value="custom">Custom upstream</option></select></div>
       <div class="small">Enter the real upstream URL and key above. The local endpoint is generated on Apply. Keep this VS Code window open while using the proxy.</div>
       <details><summary>Advanced proxy settings</summary><div class="field">
         <button id="${id('Reset')}" type="button">Restore preset defaults</button>
-        <label for="${id('messagesPath')}">Messages API path</label><input id="${id('messagesPath')}" type="text">
+        <label for="${id('messagesPath')}">Upstream API path</label><input id="${id('messagesPath')}" type="text">
         <label for="${id('authMode')}">Upstream authentication</label><select id="${id('authMode')}"><option value="both">Bearer + x-api-key</option><option value="bearer">Bearer</option><option value="x-api-key">x-api-key</option><option value="custom">Custom header</option></select>
         <label for="${id('authHeader')}">Custom authentication header name (key comes from SecretStorage)</label><input id="${id('authHeader')}" type="text">
         ${['headers', 'parameters', 'nativeToolMap'].map(name => `<label for="${id(name)}">${name === 'headers' ? 'Additional headers (JSON, no credentials)' : name === 'parameters' ? 'Additional request parameters (JSON)' : 'Native tool name map (JSON)'}</label><textarea id="${id(name)}" spellcheck="false"></textarea>`).join('')}
         ${flags.map(([name, label]) => `<label class="check"><input id="${id(name)}" type="checkbox"> ${label}</label>`).join('')}
         ${numbers.map(([name, label, min, max]) => `<label for="${id(String(name))}">${label}</label><input id="${id(String(name))}" type="number" min="${min}" ${max !== '' ? `max="${max}"` : ''} step="1">`).join('')}
+        <div id="${id('ResponsesNote')}" class="small" hidden>Responses uses reasoning.effort (for example {"reasoning":{"effort":"high"}} in additional parameters), not numeric thinking budgets. System caching sets a stable prompt_cache_key; the upstream decides whether to cache. Native function and custom tools, images and encrypted reasoning retain their Responses formats.</div>
         <div class="small">Overrides apply only to this provider. History/tool-output limits may omit context; omissions are marked. Stream rebuilding is required for tool mapping and proxy web tools.</div>
       </div></details>
     </div>

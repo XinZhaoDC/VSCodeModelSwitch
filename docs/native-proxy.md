@@ -1,6 +1,6 @@
-# Native Claude proxy
+# Native Claude and Codex proxy
 
-Claude providers can use **Direct connection** or a **Built-in proxy**. The proxy
+Claude and Codex API providers can use **Direct connection** or a **Built-in proxy**. The proxy
 uses Node.js provided by the VS Code extension host; Python, Flask and external
 proxy terminals are not required. Install/run the extension in the same
 local/SSH/WSL/container environment as Claude Code.
@@ -20,7 +20,7 @@ proxy.
 
 In Add Provider or an existing provider's **Config** editor, continue to enter
 the actual upstream Base URL, API key and Model ID. Select **Built-in proxy**,
-then **justdowork** or **Custom Anthropic**. The preset supplies defaults;
+then **justdowork** or **Custom upstream**. The preset supplies defaults;
 Advanced proxy settings stores only per-provider differences. Restore preset
 defaults resets those differences in the unsaved form. Switching to Direct
 retains the saved proxy settings for later use.
@@ -32,7 +32,8 @@ placeholder credential. Upstream templates and exported provider metadata keep
 their original meaning. Restart an existing Claude client after applying new
 settings. A failed client configuration write rolls back the staged route.
 
-Each provider has an independent `/providers/<id>` endpoint. An in-flight
+Each provider has an independent `/providers/<id>` endpoint (Codex uses
+`/providers/<id>/v1` so its client appends `/responses`). An in-flight
 request uses a snapshot of its provider configuration. Switching to another
 provider does not redirect existing clients' old endpoint to the new key.
 
@@ -82,24 +83,70 @@ instruction/current turn and native tool-result pairs are retained, even if a
 single turn exceeds the budget. This proxy cannot guarantee that a very long
 single prompt fits an upstream model. The count_tokens endpoint is approximate.
 
-Custom Anthropic defaults to native tool schemas with no relay-specific
+Custom upstream defaults to native tool schemas with no relay-specific
 injection or web tools. Advanced users can add known mappings/headers/options.
 Turning stream reconstruction off forwards native SSE and still checks error
 and terminal events; text tool repair/mapping and server web tools require
-reconstruction. It is not an OpenAI Responses/Anthropic protocol converter;
-Codex providers continue to use their existing direct connection.
+reconstruction.
+
+## Codex API configuration
+
+The Config and Add Provider forms use the same settings for both clients.
+Codex additionally selects its **Upstream API format**; changing the format
+restores its preset defaults. Official mode has no API proxy and stops Codex
+routes without changing Claude's applied proxy record.
+
+- **OpenAI Responses** (default): `/v1/responses`, Bearer authentication.
+  Native function/custom tools, hosted tool items, images, previous response IDs,
+  and encrypted reasoning remain in their original formats. Headers, additional
+  parameters, tool name maps, opt-in text tool protocol/JSON repair, history and
+  tool-result/output limits, retries, timeout, keepalive and proxy web tools are
+  applied to Responses requests. System caching sets a stable `prompt_cache_key`
+  from instructions/developer messages; the upstream decides whether to cache.
+  Use `{"reasoning":{"effort":"high"}}` in additional parameters for reasoning
+  intensity. Responses has no equivalent numeric thinking budget: those two
+  fields are disabled and nonzero imported budgets are rejected, never ignored.
+  Upstream response IDs are preserved for subsequent `previous_response_id`.
+  Text-emulated tools require full input history; use native tools for stored
+  response continuations.
+- **Anthropic Messages**: Codex Responses requests are translated to Messages,
+  using the same CC compatibility settings, thinking budgets and cache
+  breakpoints. Function tools use their JSON schemas; custom text tools receive
+  an `input` string and are restored as custom calls. Full input history and
+  stream reconstruction are required. OpenAI hosted tools, structured output,
+  encrypted OpenAI state, conversation IDs and `previous_response_id` cannot be
+  translated and produce an explicit error. Start a new client session when
+  switching protocol families. Images require URLs or inline image data.
+
+Responses streams are reconstructed with Responses events (including tool calls,
+the final output and usage), or forwarded natively when reconstruction is off.
+JSON repair requires reconstruction. Failed/incomplete/empty or reasoning-only
+replies and missing terminal events are failures even under HTTP200. Web results
+are fed back into the model; client tools still execute in Codex. When web and
+client calls arrive together, client calls are preserved and web work is deferred
+explicitly. History keeps complete call/output groups and the first/current
+input, which can exceed the configured character budget.
+
+Each tool stores its own applied snapshot and credential reference. Save and
+Verify do not update an applied route. Window reload restores each last-applied
+snapshot independently and preserves pending edits. Applied Codex TOML contains
+only the local endpoint/placeholder key; upstream metadata remains unchanged.
 
 ## Diagnostics and validation
 
 Fetch Models and Network & Usage query the upstream. Verify Model uses the
 provider's saved connection settings in a temporary route without changing the
 already applied one. Claude verification requires an SSE answer of `OK` and
-message_stop, and rejects thinking-only/empty/error streams. It makes a real
+message_stop. Codex verification requires a completed Responses answer of `OK`.
+Both reject thinking-only/empty/error streams. Verification makes a real
 model request when a real provider is selected and can consume quota.
 
 Local validation: `npm run test:proxy` compiles TypeScript and runs a loopback
 mock plus mocked VS Code API and webview message tests. No keys/internet are
-used. These tests establish local protocol/lifecycle behavior; an unavailable
+used. `npm run test:codex-proxy` checks both Codex upstream protocols, transformations,
+Responses JSON/SSE, native tools, retry/error/cancellation and local web tools;
+`npm run test:codex-modes` checks the sandboxed official/API file behavior.
+These tests establish local protocol/lifecycle behavior; an unavailable
 relay cannot be declared working on that basis. Browser appearance and actual
 Claude client behavior need extension-host acceptance separately.
 

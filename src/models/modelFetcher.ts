@@ -187,7 +187,7 @@ function buildReachabilityUrl(baseUrl: string): string {
 }
 
 export function buildAuthHeaderCandidates(tool: ToolId, apiKey: string, proxy?: ProxyConfig): Record<string, string>[] {
-  if (tool === 'claude' && proxy?.mode === 'proxy') return [proxyAuthHeaders(apiKey, proxy)];
+  if (proxy?.mode === 'proxy') return [proxyAuthHeaders(apiKey, proxy, tool)];
   if (tool === 'claude') {
     const anthropicVersion = vscode.workspace
       .getConfiguration('vscodemodelswitch')

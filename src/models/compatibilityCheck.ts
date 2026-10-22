@@ -1,6 +1,7 @@
 import { CompatibilityResult, ProxyConfig, ToolId } from '../types';
 import { buildAuthHeaderCandidates, buildCompatibilityUrl } from './modelFetcher';
 import { resolveProxyOptions } from '../proxy/config';
+import { decodeResponsesBody } from '../proxy/responses';
 
 export async function verifyModel(
   tool: ToolId,
@@ -18,7 +19,7 @@ export async function verifyModel(
     // Omitting the field lets the provider select its supported default.
     { model, max_tokens: 256, stream: true, messages: [{ role: 'user', content: 'Reply with exactly OK and no other text.' }] },
     { model, max_tokens: 256, stream: true, thinking: { type: 'adaptive' }, output_config: { effort: 'high' }, messages: [{ role: 'user', content: 'Reply with exactly OK and no other text.' }] }
-  ] : [{ model, max_output_tokens: 1, input: 'Reply OK.' }];
+  ] : [{ model, max_output_tokens: 256, stream: true, input: 'Reply with exactly OK and no other text.' }];
 
   for (const authHeaders of buildAuthHeaderCandidates(tool, apiKey)) {
     for (let bodyIndex = 0; bodyIndex < bodies.length; bodyIndex += 1) {
@@ -45,6 +46,13 @@ export async function verifyModel(
       const text = await response.text();
       const latencyMs = Math.round(performance.now() - startedAt);
       if (response.ok) {
+        try {
+          const result = decodeResponsesBody(text, response.headers.get('content-type')?.includes('text/event-stream') ?? false);
+          const answer = (result.output ?? []).flatMap((item: any) => item.type === 'message' ? item.content ?? [] : []).filter((part: any) => part.type === 'output_text').map((part: any) => part.text ?? '').join('').trim();
+          if (result.status !== 'completed' || answer !== 'OK') throw new Error('Model returned no completed OK answer (reasoning alone does not pass)');
+        } catch (error) {
+          return { ok: false, endpoint, httpStatus: response.status, latencyMs, checkedAt, failureKind: 'request', error: (error instanceof Error ? error.message : 'Invalid Responses reply').split(apiKey).join('[redacted]') };
+        }
         return { ok: true, endpoint: response.url || endpoint, httpStatus: response.status, latencyMs, checkedAt };
       }
       if ((response.status === 401 || response.status === 403) && tool === 'claude' && authHeaders.Authorization) {

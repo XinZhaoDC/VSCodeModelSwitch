@@ -2,7 +2,47 @@
 
 This project can be validated locally without publishing to the VSCode Marketplace.
 
-## Codex mode controls and Verify Model fix — v0.3.3 — 2026-10-21
+## Codex proxy and mode status — v0.4.0 — 2026-10-22
+
+Run the automated checks with existing dependencies:
+
+```bash
+npm run check
+npm run test:proxy
+npm run test:codex-proxy
+npm run test:codex-modes
+```
+
+Completed validation: TypeScript check/compile passed, **64 UI/lifecycle/CC
+checks** and **22 Codex proxy checks** passed, and sandbox official/API/auth
+assertions passed. The tests cover native Responses and Anthropic translation,
+tools/images/opaque state, response identity/continuation, JSON/SSE completion,
+retry/timeout/cancellation, local web tools, pending Apply, rollback, independent
+reload snapshots and mode buttons. Requests and credentials are synthetic;
+servers bind to loopback. Mode tests retain a unique temporary sandbox rather
+than deleting an old fixed directory.
+
+`vscodemodelswitch-0.4.0.vsix` was built and installed locally. Its 60 compiled
+files matched the tested build and installation byte for byte. No Marketplace
+release, live provider call or real client configuration change was performed.
+
+After `Developer: Reload Window`, check the real webview:
+
+1. The overview has Tool / Mode / Provider Name / Model ID / Status columns.
+2. Official Codex needs no saved API source: show Official account, Signed in
+   or Login required, and Client default when no model is configured. Signed in
+   only detects locally stored login credentials, not remote session validity.
+3. Current mode is explicit; Use Official Account and Apply API Provider are
+   buttons. Already-active official mode disables its action to keep the login.
+4. Use sandbox before testing a mode switch: it clears both config/auth files.
+   API Apply can select a saved source even when official mode had no active one.
+5. Both Config editors expose proxy controls; Codex selects Responses or
+   Anthropic upstream format. Saving should leave the applied route unchanged.
+
+Visual rendering and real CLI/upstream acceptance remain manual checks. See
+[native proxy protocol limits](native-proxy.md) before changing API format.
+
+## Historical: Codex mode controls and Verify Model fix — v0.3.3 — 2026-10-21
 
 The Codex section now exposes tool-level `Apply Official` and `Apply API` radio
 actions. Both clear `config.toml` and `auth.json`; Official mode leaves Codex
@@ -312,8 +352,10 @@ For each mock provider:
 1. Click `Network & Usage`; network and Models API should pass.
 2. Open `Config`, enable Usage Query, select `Auto Detect`, save, and run
    `Network & Usage` again. The mock remaining quota is `12.5 USD`.
-3. Click `Verify Model`; the mock `/v1/messages` and `/v1/responses` endpoints
-   should pass.
+3. Use the automated proxy suites above for `Verify Model` completion/error
+   checks. The standalone `mock:models` server only supplies a minimal JSON
+   fixture and does not simulate a complete verified SSE/Responses answer;
+   its HTTP200 must not be treated as model success.
 4. Open `View -> Output`, select `VSCodeModelSwitch`, and confirm diagnostics
    contain no API key or raw response body.
 5. Confirm the global status area shows log and backup sizes.

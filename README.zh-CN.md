@@ -26,13 +26,16 @@ Apply 之前保存在 VS Code SecretStorage 中。
 - 提供按需网络检查、真实模型协议验证和可选额度查询。
 - 导入和导出会清除 API key；SecretStorage 不参与导出。
 - 显示日志、Claude 备份、Codex 备份大小并提供范围明确的删除按钮。
-- Claude Provider 可选择 TypeScript 原生内置代理，无需 Python；提供 justdowork 预设和自定义 Anthropic 设置。
+- Claude 与 Codex API Provider 均可选择 TypeScript 原生内置代理，无需 Python；提供 justdowork 预设和自定义上游设置。
+- 两者 Config 共用连接模式、认证、请求头、参数覆盖、流与工具处理、历史/输出限制、重试、超时及网页工具。Codex 默认使用 OpenAI Responses，也可选择 Anthropic Messages 上游并转换协议；数字思考预算适用于 Anthropic，Responses 用附加参数中的 `reasoning.effort`。
 - 添加及已有 Provider 的 Config 均可编辑代理；Save 后提示 Pending Apply，Apply 才更新实际连接。
 - 单独显示本地代理状态和上游请求结果；支持代理详情、停止/重启与日志。
-- 内置代理上游请求使用扩展宿主的全局 fetch，与插件 Network 检查共享 VS Code Server 的 host proxy 出口。
-- Codex 区域在 Enabled 时提供“Apply Official”和“Apply API”两个单选操作：两者都会先清空 `config.toml` 与 `auth.json`；官方模式随后重新登录，API 模式再写入当前 API Provider 配置。Codex API Provider 的 Config 编辑方式与 Claude Code 一致。
+- HTTPS 上游请求使用扩展宿主的全局 fetch，与 Network 检查共享 host proxy 出口；缓冲式 HTTP 上游请求使用 Node HTTP。
+- 顶部状态表显示 Tool / Mode / Provider Name / Model ID / Status。官方账号独立显示 Official account、Signed in 或 Login required；未指定模型时显示 Client default，不依赖已保存的 API Provider。
+- Codex 区域明确显示 Current mode，使用 Use Official Account 与 Apply API Provider 按钮。切换会清空 `config.toml` 与 `auth.json`；官方模式随后重新登录，API 模式再写入所选 API Provider。已处于官方模式时禁用官方切换按钮，保留现有登录。Config 编辑方式与 Claude Code 一致。
 
 原生代理的字段、使用方式、窗口生命周期及验收边界见 [说明](docs/native-proxy.md)。适配模块沿用上游 PolyForm Noncommercial 许可，见 [第三方许可](THIRD_PARTY_NOTICES.md)。
+版本变化见[功能更新记录](AI_Prompt/03-功能更新记录.md)，验证步骤见[验证指南](docs/validation.md)。
 
 ## 要求与 VSIX 安装
 
@@ -105,7 +108,7 @@ Sandbox 使用相同的相对目录结构。
 - API Key
 
 `Fetch Models` 会在 Provider 支持模型列表接口时加载建议。失败只显示警告，
-可以直接输入 Model ID，也可以留空。空模型统一显示为 `NULL`，以后可通过
+可以直接输入 Model ID，也可以留空。Provider 卡片中的空模型显示为 `NULL`，以后可通过
 `Config` 或 `Model` 调整。`Set active after saving` 默认不勾选。
 
 `Full configuration` 会提供完整 Claude JSON 或 Codex TOML 模板。必须在
@@ -131,9 +134,12 @@ Codex:  model_providers.OpenAI.experimental_bearer_token
   应用的配置和历史备份。
 - `Applied Config`：打开当前用于匹配状态的实际配置文件。
 
-全局状态包括 `Off`、`Unactivated`、`Ready`、`Key missing`、
-`Models stale`、`Degraded` 和 `Network error`。工具关闭或未激活时 Provider、
-Model 均显示 `NULL`；已应用配置没有模型时 Model 也显示 `NULL`。
+顶部状态表显示 Tool、Mode、Provider Name、Model ID 和 Status。API 状态包括
+`Off`、`Unactivated`、`Ready`、`Key missing`、`Models stale`、`Degraded` 和
+`Network error`。官方 Codex 单独显示 `Signed in` 或 `Login required`，不依赖
+API Provider。活动模式未指定模型时显示 `Client default`，没有 Provider 时显示
+`Not configured`；卡片仍用 `NULL` 表示未设置模型。`Signed in` 只表示本地存在
+登录凭据，不代表已在线检查会话有效期。
 
 ### 4. 网络、模型验证与 Usage
 

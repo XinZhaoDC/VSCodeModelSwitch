@@ -56,7 +56,12 @@ ClaudeAdapter.prototype.apply = async function (resolved) {
 };
 CodexAdapter.prototype.getConfigPath = () => path.join(sandboxRoot, '.codex/config.toml');
 CodexAdapter.prototype.readActiveConfig = async () => appliedCodex;
-CodexAdapter.prototype.apply = async resolved => { appliedCodex = { baseUrl: resolved.codex.baseUrl, key: resolved.codex.key, model: resolved.codex.model }; };
+CodexAdapter.prototype.apply = async resolved => {
+  if (failWrite) throw new Error('Synthetic configuration write failure');
+  appliedCodex = { baseUrl: resolved.codex.baseUrl, key: resolved.codex.key, model: resolved.codex.model, mode: resolved.codex.mode };
+  writes++;
+};
+CodexAdapter.prototype.applyOfficialMode = async () => { appliedCodex = { mode: 'official' }; writes++; };
 const { VSModelSwitchApp } = require('../out/app');
 const { SidebarViewProvider } = require('../out/ui/sidebarView');
 const { verifyModel } = require('../out/models/compatibilityCheck');
@@ -93,7 +98,7 @@ async function main() {
   check('provider overrides are separate from presets and validate authentication metadata', () => {
     assert.equal(normalizeProxyConfig(undefined, 'claude').mode, 'direct');
     assert.deepEqual(normalizeProxyConfig({ mode: 'proxy', preset: 'justdowork', overrides: { maxAttempts: 3, timeoutMs: 5000 } }, 'claude').overrides, { timeoutMs: 5000 });
-    assert.throws(() => normalizeProxyConfig(config(), 'codex'));
+    assert.equal(normalizeProxyConfig(config(), 'codex').apiFormat, 'responses');
     assert.throws(() => normalizeProxyConfig(config({ headers: { Authorization: 'secret' } }), 'claude'));
     assert.throws(() => normalizeProxyConfig(config({ parameters: { model: 'override' } }), 'claude'));
   });
@@ -142,13 +147,16 @@ async function main() {
       return;
     }
     const chunks = []; for await (const part of req) chunks.push(part);
-    const payload = JSON.parse(Buffer.concat(chunks)); offered.push({ payload, headers: req.headers });
+    const payload = JSON.parse(Buffer.concat(chunks)); offered.push({ payload, headers: req.headers, url: req.url });
     const item = script.shift() ?? { text: 'OK' };
     if (delay) { res.on('close', () => { if (!res.writableEnded) aborted = true; }); await new Promise(resolve => setTimeout(resolve, delay)); }
     if (res.destroyed) return;
     if (typeof item === 'number') { res.writeHead(item); res.end(item === 403 ? '' : JSON.stringify({ error: { message: 'all nodes exhausted' } })); return; }
     if (item.sse) { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.end(item.sse); return; }
     res.writeHead(200, { 'content-type': 'application/json' });
+    if (payload.input !== undefined) {
+      res.end(JSON.stringify({ id: 'resp_mock', object: 'response', status: 'completed', output: [{ type: 'message', id: 'msg_mock', role: 'assistant', content: [{ type: 'output_text', text: item.text ?? 'OK', annotations: [] }] }], usage: { input_tokens: 12, output_tokens: 2, total_tokens: 14 } })); return;
+    }
     res.end(JSON.stringify({ id: 'msg_upstream', type: 'message', role: 'assistant', model: payload.model,
       content: item.content ?? [{ type: 'text', text: item.text }], stop_reason: item.stop_reason ?? 'end_turn', usage: { input_tokens: 12, output_tokens: 2 } }));
   });
@@ -222,6 +230,7 @@ async function main() {
 
     await testApplication(base, offered, () => { offered = []; }, () => offered, config);
     await testUnsyncedApplication(base, config);
+    await testCodexApplication(base, () => offered);
     testUi();
     check('diagnostics contain no upstream test key', () => assert.ok(logs.every(line => !line.includes('synthetic-secret'))));
   } finally {
@@ -332,6 +341,108 @@ function testUi() {
   fire({ type: 'state', state: { providers: [provider], currentProviderIds: { claude: 'existing' }, apiStatuses: [], configPaths: {}, toolEnabled: { claude: true, codex: true }, storageSizes: {}, globalCliSync: true } });
   const allText = element => element.textContent + ' ' + element.children.map(allText).join(' ');
   check('card separates local Running, upstream failure and Pending Apply', () => { const text = allText(elements.get('claudeProviders')); assert.match(text, /Proxy: Running/); assert.match(text, /Failed · HTTP 503/); assert.match(text, /Pending Apply/); });
+  fire({ type: 'configEditor', providerId: 'codex-existing', tool: 'codex', text: 'model_provider = "OpenAI"', hasKey: true,
+    proxy: { mode: 'proxy', preset: 'custom', apiFormat: 'responses', overrides: { timeoutMs: 7000 } } });
+  check('Codex Config displays the shared proxy controls and Responses defaults', () => {
+    assert.equal(form('edit')('').hidden, false); assert.equal(form('edit')('Mode').value, 'proxy');
+    assert.equal(form('edit')('messagesPath').value, '/v1/responses'); assert.equal(form('edit')('timeoutMs').value, '7000');
+    assert.equal(form('edit')('maxThinkingBudget').disabled, true);
+  });
+  form('edit')('timeoutMs').value = '8000'; elements.get('saveConfigButton').listeners.click();
+  check('Codex Config Save carries its API format and advanced settings', () => {
+    assert.equal(messages.at(-1).providerId, 'codex-existing'); assert.equal(messages.at(-1).proxy.apiFormat, 'responses'); assert.equal(messages.at(-1).proxy.overrides.timeoutMs, 8000);
+  });
+  form('edit')('ApiFormat').value = 'anthropic'; form('edit')('ApiFormat').listeners.change();
+  check('Codex can select Anthropic and edit the complete CC thinking settings', () => {
+    assert.equal(form('edit')('messagesPath').value, '/v1/messages'); assert.equal(form('edit')('maxThinkingBudget').disabled, false);
+  });
+  elements.get('cancelConfigButton').listeners.click();
+  check('Codex Cancel restores API format, defaults and saved overrides', () => { assert.equal(form('edit')('ApiFormat').value, 'responses'); assert.equal(form('edit')('timeoutMs').value, '7000'); });
+  const apiSource = { id: 'codex-source', name: 'Saved API', tool: 'codex', hasKey: true, modelPolicy: { type: 'fixed', model: 'api-model' }, codexMode: 'api' };
+  const officialState = { providers: [apiSource], currentProviderIds: {}, codexMode: 'official', apiStatuses: [
+    { tool: 'claude', mode: 'api', providerName: 'CC source', model: 'cc-model', status: 'ready' },
+    { tool: 'codex', mode: 'official', providerName: 'Official account', status: 'signedIn' }
+  ], configPaths: {}, toolEnabled: { claude: true, codex: true }, storageSizes: {}, globalCliSync: true };
+  fire({ type: 'state', state: officialState });
+  check('overview renders five columns with explicit official mode, client model default and Signed in', () => {
+    assert.match(html, /class="statusHead">Tool/); assert.match(html, /class="statusHead">Mode/);
+    assert.equal(elements.get('statusRows').children.length, 10);
+    const text = allText(elements.get('statusRows')); assert.match(text, /Official account/); assert.match(text, /Client default/); assert.match(text, /Signed in/); assert.doesNotMatch(text, /NULL|Unactivated/);
+  });
+  check('mode actions are buttons and the active official mode cannot accidentally clear its login', () => {
+    assert.equal(elements.get('codexOfficialMode').tagName, 'BUTTON'); assert.equal(elements.get('codexApiMode').tagName, 'BUTTON');
+    assert.match(elements.get('codexCurrentMode').textContent, /Official account/); assert.equal(elements.get('codexOfficialMode').disabled, true); assert.equal(elements.get('codexApiMode').disabled, false);
+  });
+  elements.get('codexApiMode').listeners.click();
+  check('API button sends an action without optimistically changing the displayed mode', () => { assert.equal(messages.at(-1).type, 'applyCodexMode'); assert.equal(messages.at(-1).mode, 'api'); assert.match(elements.get('codexCurrentMode').textContent, /Official account/); });
+  fire({ type: 'state', state: { ...officialState, codexMode: 'api', currentProviderIds: { codex: apiSource.id }, apiStatuses: [{ tool: 'codex', mode: 'api', providerName: 'Saved API', model: 'api-model', status: 'ready' }] } });
+  elements.get('codexOfficialMode').listeners.click();
+  check('confirmed API state updates the mode display and enables the official action', () => { assert.equal(elements.get('codexCurrentMode').textContent, 'Current mode: API'); assert.equal(elements.get('codexOfficialMode').disabled, false); assert.equal(messages.at(-1).mode, 'official'); });
+  fire({ type: 'state', state: { ...officialState, apiStatuses: [{ tool: 'codex', mode: 'official', status: 'loginRequired' }], toolEnabled: { claude: true, codex: false } } });
+  check('login-required state is explicit and disabling Codex locks both mode actions', () => { assert.match(elements.get('codexModeDetail').textContent, /Sign in/); assert.equal(elements.get('codexOfficialMode').disabled, true); assert.equal(elements.get('codexApiMode').disabled, true); });
+}
+
+async function testCodexApplication(base, offered) {
+  const ctx = context(), app = new VSModelSwitchApp(ctx);
+  const config = { mode: 'proxy', preset: 'custom', apiFormat: 'responses', overrides: { headers: { 'x-route': 'codex' }, maxAttempts: 2 } };
+  const request = async endpoint => { const response = await fetch(endpoint.baseUrl + '/responses', { method: 'POST', headers: { Authorization: 'Bearer ' + endpoint.key, 'content-type': 'application/json' }, body: JSON.stringify({ input: 'Hello' }) }); return response.json(); };
+  let reloaded;
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    await app.createProviderFromSidebar({ tool: 'claude', name: 'CC paired', baseUrl: base, key: 'synthetic-secret-cc-paired', model: 'cc-paired', applyNow: true, proxy: { mode: 'proxy', preset: 'custom' } });
+    const ccUrl = appliedClaude.env.ANTHROPIC_BASE_URL;
+    await app.createProviderFromSidebar({ tool: 'codex', name: 'Codex paired', baseUrl: base, key: 'synthetic-secret-codex', model: 'codex-paired', applyNow: true, proxy: config });
+    let state = await app.getSidebarState(), provider = state.providers.find(item => item.tool === 'codex');
+    const endpoint = { ...appliedCodex }, edit = await app.getProviderConfigFromSidebar(provider.id);
+    await request(endpoint);
+    check('Codex Apply rewrites its endpoint, routes Responses and keeps CC active independently', () => {
+      assert.equal(endpoint.key, 'vscodemodelswitch-local'); assert.match(endpoint.baseUrl, /\/v1$/);
+      assert.equal(offered().at(-1).headers.authorization, 'Bearer synthetic-secret-codex'); assert.equal(offered().at(-1).headers['x-route'], 'codex');
+      assert.equal(state.currentProviderIds.codex, provider.id); assert.equal(appliedClaude.env.ANTHROPIC_BASE_URL, ccUrl);
+    });
+    await app.saveProviderConfigFromSidebar(provider.id, edit.text, 'synthetic-secret-codex-new', undefined, undefined, { ...config, overrides: { ...config.overrides, parameters: { temperature: 0.4 } } });
+    await app.verifyProviderModelFromSidebar(provider.id);
+    check('Codex Verify uses saved settings and validates a real completed Responses answer', () => {
+      assert.equal(offered().at(-1).payload.temperature, 0.4); assert.equal(offered().at(-1).headers.authorization, 'Bearer synthetic-secret-codex-new');
+    });
+    await request(endpoint);
+    check('Codex Save/Verify leaves the applied route and key snapshot intact', () => { assert.equal(offered().at(-1).payload.temperature, undefined); assert.equal(offered().at(-1).headers.authorization, 'Bearer synthetic-secret-codex'); });
+    const before = ctx.workspaceState.get('vscodemodelswitch.appliedCodexProxy'), beforeWrites = writes;
+    ctx.workspaceState.failOnceKey = 'vscodemodelswitch.appliedRevisions';
+    await assert.rejects(() => app.applyProviderFromSidebar(provider.id), /metadata write failure/);
+    failWrite = true; await assert.rejects(() => app.applyProviderFromSidebar(provider.id), /configuration write failure/); failWrite = false;
+    await request(endpoint);
+    check('Codex failed Apply rolls back route, key and per-tool metadata', () => { assert.equal(writes, beforeWrites); assert.deepEqual(ctx.workspaceState.get('vscodemodelswitch.appliedCodexProxy'), before); assert.equal(offered().at(-1).headers.authorization, 'Bearer synthetic-secret-codex'); });
+    app.dispose();
+    reloaded = new VSModelSwitchApp({ ...context(ctx.globalState, ctx.workspaceState), secrets: ctx.secrets });
+    await new Promise(resolve => setTimeout(resolve, 30));
+    state = await reloaded.getSidebarState();
+    await request(endpoint);
+    check('reload restores both tools and the last applied Codex snapshot, preserving Pending Apply', () => {
+      assert.equal(state.providers.filter(item => item.proxyRuntime.state === 'running').length, 2);
+      assert.equal(state.providers.find(item => item.id === provider.id).needsApply, true);
+      assert.equal(offered().at(-1).headers.authorization, 'Bearer synthetic-secret-codex');
+    });
+    await reloaded.controlProxyFromSidebar(provider.id, 'stop');
+    assert.equal((await fetch(endpoint.baseUrl + '/responses', { method: 'POST', headers: { Authorization: 'Bearer ' + endpoint.key }, body: '{}' })).status, 503);
+    await reloaded.controlProxyFromSidebar(provider.id, 'start'); await request(endpoint);
+    check('Codex stop/start resumes the applied settings rather than pending edits', () => assert.equal(offered().at(-1).payload.temperature, undefined));
+    await reloaded.applyProviderFromSidebar(provider.id); await request(appliedCodex);
+    check('Codex Apply activates saved headers/parameters/key and clears pending changes', () => { assert.equal(offered().at(-1).payload.temperature, 0.4); assert.equal(offered().at(-1).headers.authorization, 'Bearer synthetic-secret-codex-new'); });
+    await reloaded.applyCodexModeFromSidebar('official');
+    check('Official mode stops Codex proxy recovery without clearing Claude proxy state', () => { assert.equal(ctx.workspaceState.get('vscodemodelswitch.appliedCodexProxy'), undefined); assert.ok(ctx.workspaceState.get('vscodemodelswitch.appliedProxy')); assert.equal(reloaded.proxyServer.runtime(provider.id).state, 'stopped'); });
+    state = await reloaded.getSidebarState();
+    check('official mode needs no saved provider and reports a usable mode rather than NULL/unactivated', () => {
+      const row = state.apiStatuses.find(item => item.tool === 'codex');
+      assert.equal(state.codexMode, 'official'); assert.equal(row.mode, 'official'); assert.equal(row.providerName, 'Official account'); assert.equal(row.status, 'loginRequired');
+    });
+    appliedCodex = { mode: 'official', officialLoggedIn: true };
+    await reloaded.reloadStateFromSidebar(); state = await reloaded.getSidebarState();
+    check('official authenticated account reports Signed in independently of API sources', () => assert.equal(state.apiStatuses.find(item => item.tool === 'codex').status, 'signedIn'));
+    await reloaded.applyCodexModeFromSidebar('api');
+    state = await reloaded.getSidebarState();
+    check('Apply API finds a saved source when no provider was active in official mode', () => { assert.equal(state.codexMode, 'api'); assert.equal(state.currentProviderIds.codex, provider.id); });
+  } finally { reloaded?.dispose(); app.dispose(); failWrite = false; }
 }
 
 main().catch(error => { console.error(error); process.exitCode = 1; });

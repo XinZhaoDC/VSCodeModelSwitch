@@ -1,19 +1,31 @@
 # VSCodeModelSwitch
 
-Claude providers now support a native TypeScript **Built-in proxy** with a
+Claude and Codex API providers support a native TypeScript **Built-in proxy** with a
 justdowork preset and per-provider advanced overrides. Configure it in Add
 Provider or an existing provider's Config editor; Save retains upstream
 configuration, and Apply generates the local client endpoint. No Python is
 required. Local running state and upstream model failures are shown separately.
-The proxy's outbound requests use the VS Code extension host's global `fetch`,
-so its host-proxy route matches the plugin's Network checks.
-The Codex section exposes two Enabled-mode radio actions: **Apply Official**
-and **Apply API**. Both clear `config.toml` and `auth.json`; Official mode then
-requires a new login, while API mode writes the selected API provider. Codex
+HTTPS upstream requests use the extension host's global `fetch`, following the
+same host-proxy route as Network checks; buffered HTTP requests use Node HTTP.
+The overview shows **Tool / Mode / Provider Name / Model ID / Status**. Official
+Codex login is shown independently of saved API providers, with **Signed in** or
+**Login required**, and **Client default** when the client chooses its model.
+The Codex section displays its current mode and two buttons: **Use Official
+Account** and **Apply API Provider**. Switching clears `config.toml` and
+`auth.json`; Official mode then requires a new login, while API mode writes the
+selected API provider. The official button is disabled while official mode is
+already active, preserving the existing login. Codex
 API provider configuration follows the same editor flow as Claude Code.
+Both Config editors expose connection mode, presets, authentication, headers,
+parameters, stream/tool processing, limits, retries, timeout and web tools.
+Codex defaults to native OpenAI Responses and can explicitly translate to an
+Anthropic Messages upstream. Numeric thinking budgets require Anthropic;
+Responses uses `reasoning.effort`. See the protocol details below before choosing.
 
 See [native proxy usage and lifecycle](docs/native-proxy.md) and
-[third-party license notices](THIRD_PARTY_NOTICES.md).
+[third-party license notices](THIRD_PARTY_NOTICES.md). Release changes and
+validation are recorded in the [changelog](AI_Prompt/03-功能更新记录.md) and
+[validation guide](docs/validation.md).
 
 English | [简体中文](README.zh-CN.md)
 
@@ -146,10 +158,13 @@ config file so those tools can authenticate.
   does not remove the already applied CLI config or backups.
 - `Applied Config`: open the file currently used for status matching.
 
-The global table shows `Off`, `Unactivated`, `Ready`, `Key missing`,
-`Models stale`, `Degraded`, or `Network error`. Provider and Model are `NULL`
-when the tool is off/unactivated; Model is also `NULL` when the applied config
-does not specify one.
+The global table shows Tool, Mode, Provider Name, Model ID and Status. API
+status can be `Off`, `Unactivated`, `Ready`, `Key missing`, `Models stale`,
+`Degraded` or `Network error`. Official Codex status is `Signed in` or
+`Login required`, independently of saved API providers. An unspecified active
+model displays `Client default`; a missing provider displays `Not configured`.
+Provider cards still display `NULL` for an unset model. `Signed in` means local
+login credentials exist; it does not check their remote expiry.
 
 ### 4. Network And Usage
 
@@ -212,7 +227,9 @@ The container-specific Node environment and VSIX workflow are documented in
 5. Repeat for Codex with `gpt-5-codex`.
 6. Confirm the generated files exist below `.vscodemodelswitch-home/` and match
    the selected providers.
-7. Run `Network & Usage` and `Verify Model` on both providers.
+7. Run `Network & Usage` on both providers. For complete Verify Model/proxy
+   protocol checks, run `npm run test:proxy` and `npm run test:codex-proxy`;
+   `mock:models` is a minimal model-list/usage fixture, not a full SSE model.
 8. Apply a second time and confirm backup size increases.
 9. Export configuration and verify that `test-key` is absent.
 10. Delete a provider and confirm the applied file remains unchanged.
@@ -227,9 +244,8 @@ The complete regression checklist is in [`docs/validation.md`](docs/validation.m
   effective home and backup directories accordingly.
 - Usage auto-detection only derives paths on the configured provider origin. It
   does not send credentials to unrelated domains.
-- This extension does not implement an HTTP proxy or intercept Claude/Codex
-  traffic, so it cannot calculate authoritative usage when a provider exposes no
-  usage API.
+- The optional proxy reports local request outcomes. Authoritative billing and
+  remaining quota still require the provider's usage API.
 
 ## License
 

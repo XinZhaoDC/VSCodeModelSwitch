@@ -25,12 +25,14 @@ export class StatusBarController implements vscode.Disposable {
   }
 
   private updateItem(item: vscode.StatusBarItem, label: string, state: ToolRuntimeState): void {
-    const provider = state.providerName ?? shortUrl(state.baseUrl) ?? 'Off';
-    const model = state.model ?? 'model unknown';
+    const official = state.mode === 'official';
+    const provider = official ? 'Official account' : state.providerName ?? shortUrl(state.baseUrl) ?? 'Not configured';
+    const model = state.model ?? (official ? 'Client default' : 'Not configured');
     item.text = `$(plug) ${label}: ${provider} / ${model}`;
     item.tooltip = [
       `VSCodeModelSwitch ${label}`,
       `Provider: ${provider}`,
+      `Mode: ${official ? 'Official account' : state.mode === 'api' || state.baseUrl ? 'API' : 'Unknown'}`,
       `Model: ${model}`,
       state.baseUrl ? `URL: ${state.baseUrl}` : undefined,
       `Config: ${state.configPath}`,

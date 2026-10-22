@@ -140,7 +140,7 @@ export class VSModelSwitchApp implements vscode.Disposable {
       directorySize(getBackupDirectory(this.claudeAdapter.getConfigPath())),
       directorySize(getBackupDirectory(this.codexAdapter.getConfigPath()))
     ]);
-    const codexMode = await this.codexAdapter.readMode().catch(() => 'unknown' as const);
+    const codexMode = this.runtimeState.codex.mode ?? 'unknown';
 
     return {
       providers,
@@ -268,16 +268,14 @@ export class VSModelSwitchApp implements vscode.Disposable {
   private getApiStatuses(): ApiStatusRow[] {
     return (['claude', 'codex'] as ToolId[]).map((tool) => {
       const runtime = this.runtimeState[tool];
-    let status = runtime.status ?? 'unactivated';
-    if (tool === 'claude' && managedProxyId(runtime.baseUrl, 'vscodemodelswitch-local') === runtime.matchedProviderId && runtime.matchedProviderId) {
-      const proxy = this.proxyServer.runtime(runtime.matchedProviderId);
-      if (proxy.state !== 'running' || proxy.lastRequest?.ok === false) status = 'degraded';
-    }
-      if (status === 'off' || status === 'unactivated') {
-        return { tool, status };
+      let status = runtime.status ?? 'unactivated';
+      if (managedProxyId(runtime.baseUrl, 'vscodemodelswitch-local') === runtime.matchedProviderId && runtime.matchedProviderId) {
+        const proxy = this.proxyServer.runtime(runtime.matchedProviderId);
+        if (proxy.state !== 'running' || proxy.lastRequest?.ok === false) status = 'degraded';
       }
       return {
         tool,
+        mode: runtime.mode ?? (runtime.baseUrl ? 'api' : 'unknown'),
         providerName: runtime.providerName,
         model: runtime.model,
         status
@@ -317,7 +315,7 @@ export class VSModelSwitchApp implements vscode.Disposable {
       hasKey: provider.codexMode === 'official' ? true : Boolean(await this.secretStore.get(provider.secretRef)),
       usageQuery: provider.usageQuery ?? defaultUsageQuery(provider.baseUrl),
       usageHasToken: Boolean(await this.secretStore.get(SecretStore.usageRef(provider.id))),
-      proxy: provider.proxy ?? { mode: 'direct', preset: 'justdowork' },
+      proxy: normalizeProxyConfig(provider.proxy, provider.tool),
       codexMode: provider.tool === 'codex' ? (provider.codexMode ?? 'api') : undefined
     };
   }
@@ -375,7 +373,10 @@ export class VSModelSwitchApp implements vscode.Disposable {
     this.ensureToolEnabled('codex');
     if (mode === 'official') {
       await this.codexAdapter.applyOfficialMode();
-      this.lastEnv = this.envManager.apply({
+      await this.context.workspaceState.update('vscodemodelswitch.appliedCodexProxy', undefined);
+      for (const provider of this.store.getProvidersByTool('codex')) this.proxyServer.stopRoute(provider.id);
+      delete this.lastEnv.OPENAI_BASE_URL; delete this.lastEnv.OPENAI_API_KEY;
+      this.lastEnv = { ...this.lastEnv, ...this.envManager.apply({
         missingSecrets: [],
         degraded: [],
         codex: {
@@ -388,7 +389,7 @@ export class VSModelSwitchApp implements vscode.Disposable {
           configText: '',
           mode: 'official'
         }
-      });
+      }) };
       delete this.toolFailures.codex;
       await this.scanCurrentProvidersFromConfig();
       this.refreshStatus();
@@ -396,7 +397,7 @@ export class VSModelSwitchApp implements vscode.Disposable {
     }
 
     const current = this.store.getCurrentProvider('codex');
-    const provider = current?.codexMode !== 'official'
+    const provider = current && current.codexMode !== 'official'
       ? current
       : this.store.getProvidersByTool('codex').find(item => item.codexMode !== 'official');
     if (!provider) {
@@ -447,7 +448,7 @@ export class VSModelSwitchApp implements vscode.Disposable {
         const cancellation = token.onCancellationRequested(() => controller.abort());
         const probeId = provider.id + '--verify-' + randomUUID();
         try {
-          const endpoint = provider.proxy?.mode === 'proxy' ? await this.proxyServer.register(probeId, provider.baseUrl, key, model, normalizeProxyConfig(provider.proxy, provider.tool)) : { baseUrl: provider.baseUrl, key };
+          const endpoint = provider.proxy?.mode === 'proxy' ? await this.proxyServer.register(probeId, provider.baseUrl, key, model, normalizeProxyConfig(provider.proxy, provider.tool), provider.tool) : { baseUrl: provider.baseUrl, key };
           return await verifyModel(provider.tool, endpoint.baseUrl, endpoint.key, model, controller.signal, provider.proxy?.mode === 'proxy' ? provider.proxy : undefined);
         } finally {
           if (provider.proxy?.mode === 'proxy') this.proxyServer.remove(probeId);
@@ -601,7 +602,7 @@ export class VSModelSwitchApp implements vscode.Disposable {
     const providers = this.store.getProviders();
     const [claudeConfig, codexConfig]: [
       { baseUrl?: string; model?: string; key?: string },
-      { baseUrl?: string; model?: string; providerId?: string; key?: string; mode?: CodexMode | 'unknown' }
+      { baseUrl?: string; model?: string; providerId?: string; key?: string; mode?: CodexMode | 'unknown'; officialLoggedIn?: boolean }
     ] = await Promise.all([
       this.claudeAdapter.readActiveConfig().catch(() => ({})),
       this.codexAdapter.readActiveConfig().catch(() => ({}))
@@ -626,21 +627,28 @@ export class VSModelSwitchApp implements vscode.Disposable {
       configPath: this.claudeAdapter.getConfigPath()
     };
 
-    const codex = !synced ? this.store.getCurrentProvider('codex') : codexConfig.mode === 'official'
-      ? providers.find(provider => provider.tool === 'codex' && provider.codexMode === 'official')
+    const codexLocalId = managedProxyId(codexConfig.baseUrl, codexConfig.key);
+    const codexMode = !synced && this.lastEnv.OPENAI_BASE_URL ? 'api' : codexConfig.mode ?? 'unknown';
+    const codex = codexMode === 'official' ? providers.find(provider => provider.tool === 'codex' && provider.codexMode === 'official')
+      : !synced ? this.store.getCurrentProvider('codex') : codexLocalId
+      ? providers.find(provider => provider.tool === 'codex' && provider.id === codexLocalId)
       : await matchProviderFromConfig(providers, 'codex', codexConfig.baseUrl, codexConfig.key, this.secretStore);
     if (codex) {
       await this.store.setCurrentProviderId('codex', codex.id);
     } else {
       await this.store.setCurrentProviderId('codex', undefined);
     }
+    const effectiveCodex = synced ? codexConfig : { baseUrl: this.lastEnv.OPENAI_BASE_URL, key: this.lastEnv.OPENAI_API_KEY, model: codex?.modelPolicy.type === 'fixed' || codex?.modelPolicy.type === 'custom' ? codex.modelPolicy.model : undefined };
     this.runtimeState.codex = {
       tool: 'codex',
-      providerName: codex?.name,
-      baseUrl: codexConfig.baseUrl,
-      model: codexConfig.model,
+      mode: codexMode,
+      providerName: codexMode === 'official' ? 'Official account' : codex?.name,
+      baseUrl: effectiveCodex.baseUrl,
+      model: effectiveCodex.model,
       matchedProviderId: codex?.id,
-      status: await this.determineToolStatus('codex', providers, codex, codexConfig.baseUrl, codexConfig.key),
+      status: !this.store.getToolEnabled('codex') ? 'off' : codexMode === 'official'
+        ? codexConfig.officialLoggedIn ? 'signedIn' : 'loginRequired'
+        : codexMode === 'unknown' ? 'degraded' : await this.determineToolStatus('codex', providers, codex, effectiveCodex.baseUrl, effectiveCodex.key),
       configPath: this.codexAdapter.getConfigPath()
     };
   }
@@ -911,33 +919,34 @@ export class VSModelSwitchApp implements vscode.Disposable {
     const value = await this.resolveProvider(provider);
     const config = normalizeProxyConfig(provider.proxy, tool);
     let rollback: (() => void) | undefined;
+    const useProxy = config.mode === 'proxy' && provider.codexMode !== 'official';
+    let endpoint = value ? { baseUrl: value.baseUrl, key: value.key } : undefined;
+    if (value && useProxy) {
+      const local = await this.proxyServer.register(provider.id, value.baseUrl, value.key, value.model, config, tool);
+      rollback = local.rollback; endpoint = local;
+    }
     if (!value) {
       resolved.missingSecrets.push(tool);
     } else if (tool === 'claude') {
-      if (config.mode === 'proxy') {
-        const endpoint = await this.proxyServer.register(provider.id, value.baseUrl, value.key, value.model, config);
-        rollback = endpoint.rollback;
-        resolved.claude = { providerId: provider.id, providerName: provider.name, ...endpoint, model: value.model, configText: proxyClientConfig(value.configText, endpoint), proxy: true };
-      } else resolved.claude = { providerId: provider.id, providerName: provider.name, baseUrl: value.baseUrl, key: value.key, model: value.model, configText: value.configText };
+      resolved.claude = { providerId: provider.id, providerName: provider.name, ...endpoint!, model: value.model, configText: useProxy ? proxyClientConfig(value.configText, endpoint!, tool) : value.configText, proxy: useProxy };
     } else {
-      resolved.codex = { providerId: provider.id, providerName: provider.name, baseUrl: value.baseUrl, key: value.key, model: value.model, codexProviderId: 'OpenAI', wireApi: 'responses', configText: value.configText, mode: provider.codexMode ?? 'api' };
+      resolved.codex = { providerId: provider.id, providerName: provider.name, ...endpoint!, model: value.model, codexProviderId: 'OpenAI', wireApi: 'responses', configText: useProxy ? proxyClientConfig(value.configText, endpoint!, tool) : value.configText, mode: provider.codexMode ?? 'api', proxy: useProxy };
     }
 
     const previousRevisions = this.context.workspaceState.get<Record<string, string>>('vscodemodelswitch.appliedRevisions', {});
-    const previousProxyRecord = this.context.workspaceState.get<AppliedProxyRecord>('vscodemodelswitch.appliedProxy');
+    const proxyRecordKey = tool === 'claude' ? 'vscodemodelswitch.appliedProxy' : 'vscodemodelswitch.appliedCodexProxy';
+    const previousProxyRecord = this.context.workspaceState.get<AppliedProxyRecord>(proxyRecordKey);
     let appliedKeyRef: string | undefined;
     let previousAppliedKey: string | undefined;
     try {
       // Finish fallible metadata/key storage before changing the user's config file.
       if (!resolved.missingSecrets.length) {
-        if (tool === 'claude') {
-          if (resolved.claude?.proxy) {
-            appliedKeyRef = SecretStore.ref(provider.id, tool) + '.applied';
-            previousAppliedKey = await this.secretStore.get(appliedKeyRef);
-            await this.secretStore.store(appliedKeyRef, value!.key);
-            await this.context.workspaceState.update('vscodemodelswitch.appliedProxy', { provider: structuredClone(provider), port: this.proxyServer.getPort(), localUrl: resolved.claude.baseUrl, keyRef: appliedKeyRef });
-          } else await this.context.workspaceState.update('vscodemodelswitch.appliedProxy', undefined);
-        }
+        if (useProxy) {
+          appliedKeyRef = SecretStore.ref(provider.id, tool) + '.applied';
+          previousAppliedKey = await this.secretStore.get(appliedKeyRef);
+          await this.secretStore.store(appliedKeyRef, value!.key);
+          await this.context.workspaceState.update(proxyRecordKey, { provider: structuredClone(provider), port: this.proxyServer.getPort(), localUrl: endpoint!.baseUrl, keyRef: appliedKeyRef });
+        } else await this.context.workspaceState.update(proxyRecordKey, undefined);
         await this.context.workspaceState.update('vscodemodelswitch.appliedRevisions', { ...previousRevisions, [provider.id]: provider.updatedAt });
       }
       if (resolved.missingSecrets.length === 0 && vscode.workspace.getConfiguration('vscodemodelswitch').get<boolean>('globalCliSync', true)) {
@@ -948,7 +957,7 @@ export class VSModelSwitchApp implements vscode.Disposable {
       rollback?.();
       try {
         await this.context.workspaceState.update('vscodemodelswitch.appliedRevisions', previousRevisions);
-        if (tool === 'claude') await this.context.workspaceState.update('vscodemodelswitch.appliedProxy', previousProxyRecord);
+        await this.context.workspaceState.update(proxyRecordKey, previousProxyRecord);
         if (appliedKeyRef) {
           if (previousAppliedKey === undefined) await this.secretStore.delete(appliedKeyRef);
           else await this.secretStore.store(appliedKeyRef, previousAppliedKey);
@@ -958,10 +967,11 @@ export class VSModelSwitchApp implements vscode.Disposable {
     }
     if (!resolved.missingSecrets.length) {
       if (resolved.claude && !resolved.claude.proxy) for (const name of ['ANTHROPIC_API_KEY', 'ENABLE_TOOL_SEARCH', 'ANTHROPIC_MODEL']) delete this.lastEnv[name];
-      this.lastEnv = this.envManager.apply(resolved);
+      if (resolved.codex?.mode === 'official') { delete this.lastEnv.OPENAI_BASE_URL; delete this.lastEnv.OPENAI_API_KEY; }
+      this.lastEnv = { ...this.lastEnv, ...this.envManager.apply(resolved) };
       this.appliedRevisions.set(provider.id, provider.updatedAt);
       delete this.toolFailures[tool];
-      if (tool === 'claude' && !resolved.claude?.proxy) this.proxyServer.stopRoute(provider.id);
+      if (!useProxy) this.proxyServer.stopRoute(provider.id);
     }
 
     this.status = statusFromResolved(resolved);
@@ -984,28 +994,37 @@ export class VSModelSwitchApp implements vscode.Disposable {
   }
 
   private async restoreAppliedProxy(): Promise<void> {
-    const record = this.context.workspaceState.get<AppliedProxyRecord>('vscodemodelswitch.appliedProxy');
-    if (!record || !this.store.getProvider(record.provider.id)) return;
-    const current = await this.claudeAdapter.readActiveConfig().catch(() => ({} as { baseUrl?: string; key?: string }));
     const synced = vscode.workspace.getConfiguration('vscodemodelswitch').get<boolean>('globalCliSync', true);
-    if (synced && (current.baseUrl !== record.localUrl || managedProxyId(current.baseUrl, current.key) !== record.provider.id)) return;
-    try {
-      const key = await this.secretStore.get(record.keyRef);
-      if (!key) throw new Error('Applied proxy key is missing; Apply this provider again');
-      const model = record.provider.modelPolicy.type === 'fixed' || record.provider.modelPolicy.type === 'custom' ? record.provider.modelPolicy.model : undefined;
-      await this.proxyServer.start(record.port);
-      const endpoint = await this.proxyServer.register(record.provider.id, record.provider.baseUrl, key, model, normalizeProxyConfig(record.provider.proxy, 'claude'));
-      this.appliedRevisions.set(record.provider.id, record.provider.updatedAt);
-      if (!synced) this.lastEnv = this.envManager.apply({ missingSecrets: [], degraded: [], claude: { providerId: record.provider.id, providerName: record.provider.name, ...endpoint, model, configText: proxyClientConfig(record.provider.configText!, endpoint), proxy: true } });
-    } catch (error) {
-      this.toolFailures.claude = error instanceof Error ? error.message : 'Proxy restore failed';
-      this.outputChannel.warn(`proxy restore failed: ${this.toolFailures.claude}`);
+    for (const tool of ['claude', 'codex'] as ToolId[]) {
+      const recordKey = tool === 'claude' ? 'vscodemodelswitch.appliedProxy' : 'vscodemodelswitch.appliedCodexProxy';
+      const record = this.context.workspaceState.get<AppliedProxyRecord>(recordKey);
+      if (!record || record.provider.tool !== tool || !this.store.getProvider(record.provider.id)) continue;
+      const current = await (tool === 'claude' ? this.claudeAdapter : this.codexAdapter).readActiveConfig().catch(() => ({} as { baseUrl?: string; key?: string }));
+      if (synced && (current.baseUrl !== record.localUrl || managedProxyId(current.baseUrl, current.key) !== record.provider.id)) continue;
+      try {
+        const key = await this.secretStore.get(record.keyRef);
+        if (!key) throw new Error('Applied proxy key is missing; Apply this provider again');
+        const model = record.provider.modelPolicy.type === 'fixed' || record.provider.modelPolicy.type === 'custom' ? record.provider.modelPolicy.model : undefined;
+        await this.proxyServer.start(record.port);
+        const endpoint = await this.proxyServer.register(record.provider.id, record.provider.baseUrl, key, model, normalizeProxyConfig(record.provider.proxy, tool), tool);
+        if (synced && endpoint.baseUrl !== record.localUrl) { endpoint.rollback?.(); throw new Error('Applied proxy port differs; Apply this provider again'); }
+        this.appliedRevisions.set(record.provider.id, record.provider.updatedAt);
+        if (!synced) {
+          const local = { providerId: record.provider.id, providerName: record.provider.name, ...endpoint, model,
+            configText: proxyClientConfig(record.provider.configText!, endpoint, tool), proxy: true };
+          this.lastEnv = { ...this.lastEnv, ...this.envManager.apply({ missingSecrets: [], degraded: [],
+            ...(tool === 'claude' ? { claude: local } : { codex: { ...local, codexProviderId: 'OpenAI', wireApi: 'responses' as const, mode: 'api' as const } }) }) };
+        }
+      } catch (error) {
+        this.toolFailures[tool] = error instanceof Error ? error.message : 'Proxy restore failed';
+        this.outputChannel.warn(`${tool} proxy restore failed: ${this.toolFailures[tool]}`);
+      }
     }
   }
 
   async controlProxyFromSidebar(providerId: string, action: 'start' | 'stop' | 'restart' | 'log'): Promise<void> {
     const provider = this.store.getProvider(providerId);
-    if (!provider || provider.tool !== 'claude') throw new Error('Claude provider not found');
+    if (!provider || provider.codexMode === 'official') throw new Error('API provider not found');
     if (action === 'log') { this.outputChannel.show(); return; }
     if (action === 'stop' || action === 'restart') this.proxyServer.stopRoute(providerId);
     if (action === 'start' || action === 'restart') {
@@ -1013,7 +1032,7 @@ export class VSModelSwitchApp implements vscode.Disposable {
         if (this.appliedRevisions.has(providerId) && this.appliedRevisions.get(providerId) !== provider.updatedAt) throw new Error('Apply pending changes before starting this proxy');
         await this.activateProvider(provider);
       }
-      delete this.toolFailures.claude;
+      delete this.toolFailures[provider.tool];
     }
     await this.scanCurrentProvidersFromConfig(); this.refreshStatus();
   }
