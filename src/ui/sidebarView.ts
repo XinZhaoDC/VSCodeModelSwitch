@@ -1,6 +1,9 @@
 import * as vscode from 'vscode';
 import { ApiStatusRow, CodexMode, CompatibilityResult, ModelInfo, ModelPolicy, NetworkTestResult, ProviderProfile, ProxyConfig, ProxyRuntime, StatusState, ToolId, UsageQueryConfig, UsageQueryResult } from '../types';
 import { proxyDefaults } from '../proxy/config';
+import { SpeedReport } from '../speed/types';
+import { NetworkProxyState } from '../network/manager';
+import { NetworkProxyConfig } from '../network/transport';
 
 export interface SidebarProviderSummary {
   id: string;
@@ -18,9 +21,13 @@ export interface SidebarProviderSummary {
   proxyRuntime?: ProxyRuntime;
   needsApply?: boolean;
   codexMode?: CodexMode;
+  speedResult?: SpeedReport;
 }
 
 export interface SidebarViewState {
+  networkProxy?: NetworkProxyState;
+  officialSpeedResult?: SpeedReport;
+  speedDirectory: string;
   providers: SidebarProviderSummary[];
   currentProviderIds: Partial<Record<ToolId, string>>;
   status: StatusState;
@@ -52,6 +59,9 @@ export interface CreateProviderInput {
 }
 
 export interface SidebarController {
+  applyNetworkProxyFromSidebar(config: NetworkProxyConfig): Promise<void>;
+  restoreNetworkProxyFromSidebar(): Promise<void>;
+  testNetworkProxyFromSidebar(config: NetworkProxyConfig): Promise<void>;
   getSidebarState(): Promise<SidebarViewState>;
   reloadStateFromSidebar(): Promise<void>;
   previewModelsFromSidebar(tool: ToolId, baseUrl: string, key: string, proxy?: ProxyConfig): Promise<ModelInfo[]>;
@@ -68,6 +78,8 @@ export interface SidebarController {
   testToolNetworkFromSidebar(tool: ToolId): Promise<void>;
   testUsageQueryFromSidebar(providerId: string, usageQuery: UsageQueryConfig, usageAccessToken?: string): Promise<void>;
   verifyProviderModelFromSidebar(providerId: string): Promise<void>;
+  speedTestFromSidebar(providerId: string | undefined, runs: 1 | 3): Promise<void>;
+  copySpeedQuery(): Promise<void>;
   deleteBackupsFromSidebar(tool: ToolId): Promise<void>;
   setToolEnabledFromSidebar(tool: ToolId, enabled: boolean): Promise<void>;
   updateProviderModelFromSidebar(providerId: string): Promise<void>;
@@ -81,6 +93,9 @@ export interface SidebarController {
 }
 
 type IncomingMessage =
+  | { type: 'applyNetworkProxy'; config: NetworkProxyConfig }
+  | { type: 'restoreNetworkProxy' }
+  | { type: 'testNetworkProxy'; config: NetworkProxyConfig }
   | { type: 'ready' }
   | { type: 'previewModels'; tool: ToolId; baseUrl: string; key: string; proxy?: ProxyConfig }
   | { type: 'createProvider'; payload: CreateProviderInput }
@@ -96,6 +111,8 @@ type IncomingMessage =
   | { type: 'testToolNetwork'; tool: ToolId }
   | { type: 'testUsageQuery'; providerId: string; usageQuery: UsageQueryConfig; usageAccessToken?: string }
   | { type: 'verifyProviderModel'; providerId: string }
+  | { type: 'speedTest'; providerId?: string; runs: 1 | 3 }
+  | { type: 'copySpeedQuery' }
   | { type: 'deleteBackups'; tool: ToolId }
   | { type: 'setToolEnabled'; tool: ToolId; enabled: boolean }
   | { type: 'updateProviderModel'; providerId: string }
@@ -223,6 +240,12 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
                 case 'verifyProviderModel':
                   await this.controller.verifyProviderModelFromSidebar(message.providerId);
                   break;
+                case 'speedTest':
+                  await this.controller.speedTestFromSidebar(message.providerId, message.runs);
+                  break;
+                case 'copySpeedQuery':
+                  await this.controller.copySpeedQuery();
+                  break;
                 case 'deleteBackups':
                   await this.controller.deleteBackupsFromSidebar(message.tool);
                   await this.postNotice(`${labelTool(message.tool)} backups deleted.`);
@@ -255,6 +278,17 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
           break;
         case 'clearLog':
           if (await this.controller.clearLogFromSidebar()) await this.postNotice('VSCodeModelSwitch output log cleared.');
+          break;
+        case 'applyNetworkProxy':
+          await this.controller.applyNetworkProxyFromSidebar(message.config);
+          await this.postNotice('Network proxy configured. Keep TUN on until clients have restarted and chat has been checked.');
+          break;
+        case 'restoreNetworkProxy':
+          await this.controller.restoreNetworkProxyFromSidebar();
+          await this.postNotice('Original network proxy settings restored. Restart existing clients.');
+          break;
+        case 'testNetworkProxy':
+          await this.controller.testNetworkProxyFromSidebar(message.config);
           break;
       }
 
@@ -420,6 +454,20 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
       font-size: 11px;
       line-height: 16px;
     }
+    .networkProxyBadge {
+      display: inline-block;
+      align-self: flex-start;
+      padding: 4px 9px;
+      border: 1px solid var(--vscode-descriptionForeground);
+      border-radius: 4px;
+      font-weight: 650;
+      color: var(--vscode-descriptionForeground);
+    }
+    .networkProxyBadge.enabled, button.networkProxyCurrent {
+      color: var(--vscode-testing-iconPassed, #73c991);
+      border-color: var(--vscode-testing-iconPassed, #73c991);
+    }
+    button.networkProxyCurrent:disabled { opacity: 1; }
     .actions {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -492,6 +540,16 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
       color: var(--vscode-descriptionForeground);
     }
     .small { color: var(--vscode-descriptionForeground); font-size: 12px; }
+    .diagnosticResults { min-width: 0; color: var(--vscode-descriptionForeground); font-size: 12px; }
+    .diagnosticRow { display: grid; grid-template-columns: 54px minmax(0, 1fr); gap: 8px; padding: 2px 0; }
+    .diagnosticLabel { color: var(--vscode-sideBar-foreground); }
+    .diagnosticValues { display: flex; flex-wrap: wrap; gap: 2px 10px; min-width: 0; }
+    .diagnosticValue { overflow-wrap: anywhere; }
+    .diagnosticWarning { color: var(--vscode-inputValidation-warningForeground); }
+    .diagnosticDetails { margin-top: 3px; overflow-wrap: anywhere; }
+    .diagnosticDetails summary { cursor: pointer; }
+    .diagnosticDetails p { margin: 5px 0; }
+    .diagnosticDetails button { margin-top: 3px; min-height: 24px; }
     [hidden] { display: none !important; }
   </style>
 </head>
@@ -510,6 +568,25 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
       <div id="storageStatus" class="syncStatus"></div>
     </div>
     <div id="notice" class="notice"></div>
+    <details class="panel" id="networkProxyPanel">
+      <summary>通过 VPN 联网 / Network proxy</summary>
+      <div id="networkProxyBadge" class="networkProxyBadge" role="status" aria-live="polite">读取状态中 / Loading</div>
+      <div id="networkProxyStatus" class="small"></div>
+      <div class="small">Use the host VPN's HTTP proxy for Claude Code, Codex and this extension's outgoing requests. API compatibility proxy settings remain separate.</div>
+      <div class="field"><label for="networkProxyUrl">HTTP proxy URL</label><input id="networkProxyUrl" type="text" value="http://127.0.0.1:12000" autocomplete="off"></div>
+      <div class="actions">
+        <label class="check"><input id="networkProxyClaude" type="checkbox" checked> Claude Code</label>
+        <label class="check"><input id="networkProxyCodex" type="checkbox" checked> Codex</label>
+      </div>
+      <div class="field"><label for="networkProxyBypass">Bypass hosts (comma-separated)</label><input id="networkProxyBypass" type="text" value="localhost,127.0.0.1,::1" autocomplete="off"></div>
+      <div class="actions">
+        <button id="testNetworkProxyButton" class="secondary" disabled>测试连接 / Test</button>
+        <button id="applyNetworkProxyButton" class="primary" disabled>启用代理 / Enable</button>
+        <button id="restoreNetworkProxyButton" class="secondary" disabled>已停用 / Disabled</button>
+      </div>
+      <div id="networkProxyTest" class="small"></div>
+      <div class="small">Apply changes client launch settings; restart clients or reload the window. VS Code HTTP proxy can also affect other extensions. Connection tests do not verify login or chat.</div>
+    </details>
     <section id="configEditor" class="section" hidden>
       <h2>Provider Configuration</h2>
       <div class="panel">
@@ -602,6 +679,11 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
           </div>
           <div class="small">Both actions clear config.toml and auth.json first. Official mode then requires Codex login; API mode applies the selected API provider.</div>
         </div>
+        <div class="actions">
+          <button id="quickOfficialSpeedButton" title="One real short request using the active official Codex login; uses model quota">Quick Speed Test · Official</button>
+          <button id="standardOfficialSpeedButton" title="Three serial real short requests using the active official Codex login; uses model quota">Standard Speed Test · Official</button>
+        </div>
+        <div id="officialSpeedResult" class="diagnosticResults"></div>
         <div id="codexProviders" class="providerList"></div>
         <div class="actions four">
           <button id="openCodexButton">Terminal</button>
@@ -686,6 +768,9 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
       storageSizes: { logBytes: 0, backupBytes: 0, claudeBackupBytes: 0, codexBackupBytes: 0 }
     };
     let busy = false;
+    let networkProxyDirty = false;
+    let networkProxyLoaded = false;
+    let networkProxyPending = '';
     let fetchedModels = [];
     let configEditorProviderId = '';
     let configEditorTool = '';
@@ -698,6 +783,16 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
     const collapsed = { claude: Boolean(savedViewState.claudeCollapsed), codex: Boolean(savedViewState.codexCollapsed) };
 
     const el = {
+      networkProxyUrl: document.getElementById('networkProxyUrl'),
+      networkProxyClaude: document.getElementById('networkProxyClaude'),
+      networkProxyCodex: document.getElementById('networkProxyCodex'),
+      networkProxyBypass: document.getElementById('networkProxyBypass'),
+      networkProxyStatus: document.getElementById('networkProxyStatus'),
+      networkProxyBadge: document.getElementById('networkProxyBadge'),
+      networkProxyTest: document.getElementById('networkProxyTest'),
+      testNetworkProxyButton: document.getElementById('testNetworkProxyButton'),
+      applyNetworkProxyButton: document.getElementById('applyNetworkProxyButton'),
+      restoreNetworkProxyButton: document.getElementById('restoreNetworkProxyButton'),
       status: document.getElementById('status'),
       statusRows: document.getElementById('statusRows'),
       syncStatus: document.getElementById('syncStatus'),
@@ -738,6 +833,9 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
       exportButton: document.getElementById('exportButton'),
       importButton: document.getElementById('importButton'),
       clearLogButton: document.getElementById('clearLogButton'),
+      quickOfficialSpeedButton: document.getElementById('quickOfficialSpeedButton'),
+      standardOfficialSpeedButton: document.getElementById('standardOfficialSpeedButton'),
+      officialSpeedResult: document.getElementById('officialSpeedResult'),
       addMode: document.getElementById('addMode'),
       configTextField: document.getElementById('configTextField'),
       addConfigText: document.getElementById('addConfigText'),
@@ -777,6 +875,10 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
       const message = event.data;
       if (message.type === 'state') {
         state = message.state;
+        networkProxyLoaded = true;
+        // Only confirmed results replace a draft; failed Apply keeps it for retry.
+        if (networkProxyPending === 'apply' && sameNetworkProxy(state.networkProxy?.config, networkProxyInput()) ||
+            networkProxyPending === 'restore' && !state.networkProxy?.config) networkProxyDirty = false;
         render();
         return;
       }
@@ -816,6 +918,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
       }
       if (message.type === 'busy') {
         busy = message.busy;
+        if (!busy) networkProxyPending = '';
         setBusy(busy);
         return;
       }
@@ -841,6 +944,60 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
     });
 
     el.reloadButton.addEventListener('click', () => post({ type: 'ready' }));
+    function networkProxyInput() {
+      return { url: el.networkProxyUrl.value.trim(), noProxy: el.networkProxyBypass.value,
+        claude: el.networkProxyClaude.checked, codex: el.networkProxyCodex.checked };
+    }
+    function sameNetworkProxy(a, b) {
+      if (!a || !b) return false;
+      const signature = config => JSON.stringify([
+        config.url.trim().replace(/[/]$/, ''),
+        [...new Set(('localhost,127.0.0.1,::1,' + config.noProxy).split(',').map(host => host.trim()).filter(Boolean))].sort(),
+        config.claude, config.codex
+      ]);
+      return signature(a) === signature(b);
+    }
+    function renderNetworkProxyActions() {
+      const network = state.networkProxy || {};
+      const enabled = Boolean(network.config);
+      const changed = enabled && !sameNetworkProxy(network.config, networkProxyInput());
+      const locked = busy || !networkProxyLoaded;
+      el.networkProxyBadge.textContent = !networkProxyLoaded ? '读取状态中 / Loading' : enabled ? '● 已启用 / Enabled' : '○ 已停用 / Disabled';
+      el.networkProxyBadge.className = 'networkProxyBadge' + (enabled ? ' enabled' : '');
+      el.networkProxyStatus.textContent = enabled
+        ? (changed ? '当前代理仍已启用；有更改待应用。 / Enabled — changes not applied. ' : '当前为启用状态，无需重复启用。 / Enabled — no changes. ') + (network.message || '')
+        : '代理已停用，点击启用代理以开启。 / Disabled. ' + (network.message || '');
+      el.applyNetworkProxyButton.textContent = networkProxyPending === 'apply' ? '应用中… / Applying…'
+        : !enabled ? '启用代理 / Enable' : changed ? '应用更改 / Apply changes' : '✓ 已启用 / Enabled';
+      el.applyNetworkProxyButton.className = enabled && !changed ? 'networkProxyCurrent' : 'primary';
+      el.applyNetworkProxyButton.disabled = locked || enabled && !changed;
+      el.restoreNetworkProxyButton.textContent = networkProxyPending === 'restore' ? '停用中… / Disabling…'
+        : enabled ? '停用并恢复 / Disable' : '已停用 / Disabled';
+      el.restoreNetworkProxyButton.disabled = locked || !enabled;
+      el.testNetworkProxyButton.textContent = networkProxyPending === 'test' ? '测试中… / Testing…' : '测试连接 / Test';
+      el.testNetworkProxyButton.disabled = locked;
+      for (const input of [el.networkProxyUrl, el.networkProxyBypass, el.networkProxyClaude, el.networkProxyCodex]) input.disabled = locked;
+    }
+    function submitNetworkProxy(action) {
+      networkProxyPending = action;
+      setBusy(true); // Lock immediately, before the extension host acknowledges it.
+      post(action === 'restore' ? { type: 'restoreNetworkProxy' }
+        : { type: action === 'apply' ? 'applyNetworkProxy' : 'testNetworkProxy', config: networkProxyInput() });
+    }
+    for (const input of [el.networkProxyUrl, el.networkProxyBypass, el.networkProxyClaude, el.networkProxyCodex]) {
+      input.addEventListener('input', () => { networkProxyDirty = true; renderNetworkProxyActions(); el.networkProxyTest.textContent = ''; });
+    }
+    el.testNetworkProxyButton.addEventListener('click', () => {
+      if (!el.testNetworkProxyButton.disabled) submitNetworkProxy('test');
+    });
+    el.applyNetworkProxyButton.addEventListener('click', () => {
+      if (!el.applyNetworkProxyButton.disabled) submitNetworkProxy('apply');
+    });
+    el.restoreNetworkProxyButton.addEventListener('click', () => {
+      if (!el.restoreNetworkProxyButton.disabled) submitNetworkProxy('restore');
+    });
+    el.quickOfficialSpeedButton.addEventListener('click', () => post({ type: 'speedTest', runs: 1 }));
+    el.standardOfficialSpeedButton.addEventListener('click', () => post({ type: 'speedTest', runs: 3 }));
     el.openClaudeButton.addEventListener('click', () => post({ type: 'openClaudeTerminal' }));
     el.openCodexButton.addEventListener('click', () => post({ type: 'openCodexTerminal' }));
     el.viewClaudeConfigButton.addEventListener('click', () => post({ type: 'viewConfig', tool: 'claude' }));
@@ -893,6 +1050,14 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
       el.modelSelect.addEventListener('input', updateSaveState);
 
     function render() {
+      const network = state.networkProxy || {};
+      if (!networkProxyDirty) {
+        const config = network.config || { url: 'http://127.0.0.1:12000', noProxy: 'localhost,127.0.0.1,::1', claude: true, codex: true };
+        el.networkProxyUrl.value = config.url; el.networkProxyBypass.value = config.noProxy;
+        el.networkProxyClaude.checked = config.claude; el.networkProxyCodex.checked = config.codex;
+      }
+      renderNetworkProxyActions();
+      el.networkProxyTest.textContent = network.test ? 'Transport test via ' + network.test.proxyUrl + ' at ' + network.test.checkedAt + ': ' + network.test.results.map(item => item.target + ' — ' + (item.reachable ? 'reachable (HTTP ' + item.status + ')' : item.error)).join('; ') + '. Login/chat not verified.' : '';
       renderStatus();
       renderProviderList('claude', el.claudeProviders, state.toolEnabled.claude);
       renderProviderList('codex', el.codexProviders, state.toolEnabled.codex);
@@ -901,6 +1066,8 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
       el.claudeEnabled.checked = state.toolEnabled.claude;
       el.codexEnabled.checked = state.toolEnabled.codex;
       el.codexCurrentMode.textContent = 'Current mode: ' + labelMode(state.codexMode);
+      el.officialSpeedResult.hidden = state.codexMode !== 'official';
+      if (!el.officialSpeedResult.hidden) renderDiagnostics(el.officialSpeedResult, undefined, undefined, false, state.officialSpeedResult);
       const codexStatus = state.apiStatuses.find(row => row.tool === 'codex');
       el.codexModeDetail.textContent = state.codexMode === 'official'
         ? codexStatus && codexStatus.status === 'loginRequired' ? 'Official mode is selected. Sign in from the Codex client.' : 'Uses Codex sign-in. Model selection follows the Codex client.'
@@ -1027,20 +1194,10 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
             : 'Compatibility: ' + compatibilityFailureLabel(provider.compatibility.failureKind) + ' | ' + (provider.compatibility.error || 'Failed');
           meta.appendChild(compatibility);
         }
-        if (provider.networkTest) {
-          const network = document.createElement('div');
-          const networkWarning = provider.networkTest.reachable === false ||
-            provider.networkTest.modelsApi === 'httpError' ||
-            provider.networkTest.modelsApi === 'unreachable';
-          network.className = networkWarning ? 'providerWarning' : 'providerModel';
-          network.textContent = formatNetwork(provider.networkTest);
-          meta.appendChild(network);
-        }
-        if (provider.networkTest || provider.usageResult || provider.usageEnabled) {
-          const quota = document.createElement('div');
-          quota.className = provider.usageResult && !provider.usageResult.ok ? 'providerWarning' : 'providerModel';
-          quota.textContent = formatUsage(provider.usageResult);
-          meta.appendChild(quota);
+        if (provider.speedResult || provider.networkTest || provider.usageResult || provider.usageEnabled) {
+          const results = document.createElement('div'); results.className = 'diagnosticResults';
+          renderDiagnostics(results, provider.networkTest, provider.usageResult, provider.usageEnabled, provider.speedResult);
+          meta.appendChild(results);
         }
         if (!provider.hasKey) {
           const warning = document.createElement('div');
@@ -1083,6 +1240,15 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
         verifyButton.disabled = busy || !enabled || !provider.hasKey || (provider.tool === 'codex' && provider.codexMode === 'official') || !hasConfiguredModel(provider.modelPolicy);
         verifyButton.addEventListener('click', () => post({ type: 'verifyProviderModel', providerId: provider.id }));
         actions.appendChild(verifyButton);
+        for (const runs of [1, 3]) {
+          const speedButton = document.createElement('button');
+          speedButton.textContent = runs === 1 ? 'Quick Speed Test' : 'Standard Speed Test';
+          speedButton.title = runs + ' real short request(s); uses saved connection settings and model quota; does not Apply';
+          const official = provider.codexMode === 'official';
+          speedButton.disabled = busy || !enabled || (official ? state.codexMode !== 'official' : !provider.hasKey || !hasConfiguredModel(provider.modelPolicy));
+          speedButton.addEventListener('click', () => post({ type: 'speedTest', providerId: provider.id, runs }));
+          actions.appendChild(speedButton);
+        }
         actions.appendChild(deleteButton);
         item.appendChild(actions);
         container.appendChild(item);
@@ -1280,6 +1446,8 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
       el.codexOfficialMode.disabled = busy || !state.toolEnabled.codex || state.codexMode === 'official';
       el.codexOfficialMode.title = state.codexMode === 'official' ? 'Official mode is already active; your login is kept.' : 'Switch to official mode, clear the current Codex configuration and sign in again.';
       el.codexApiMode.disabled = busy || !state.toolEnabled.codex || !state.providers.some((provider) => provider.tool === 'codex' && provider.codexMode !== 'official' && provider.hasKey);
+      el.quickOfficialSpeedButton.disabled = busy || !state.toolEnabled.codex || state.codexMode !== 'official';
+      el.standardOfficialSpeedButton.disabled = el.quickOfficialSpeedButton.disabled;
     }
 
     function updateSaveState() {
@@ -1373,6 +1541,72 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
       if (kind === 'unsupported') return 'Unsupported endpoint';
       if (kind === 'request') return 'Request rejected';
       return 'Failed';
+    }
+
+    function renderDiagnostics(container, network, usage, usageEnabled, report) {
+      container.textContent = '';
+      // All diagnostic values, including model IDs and errors, stay plain text.
+      const add = (parent, tag, className, text) => {
+        const node = document.createElement(tag); node.className = className;
+        if (text !== undefined) node.textContent = text;
+        parent.appendChild(node); return node;
+      };
+      const row = (label, values, warning) => {
+        const line = add(container, 'div', 'diagnosticRow' + (warning ? ' diagnosticWarning' : ''));
+        add(line, 'span', 'diagnosticLabel', label);
+        const body = add(line, 'div', 'diagnosticValues');
+        for (const value of values) add(body, 'span', 'diagnosticValue', value);
+      };
+      const info = [];
+      const time = value => new Date(value).toLocaleString();
+      if (network) {
+        const values = [network.cancelled ? 'Cancelled' : network.reachable === false ? 'Unreachable' : network.reachable === undefined && !network.ok ? 'Not tested' : 'Reachable'];
+        if (network.failureStage === 'dns') values.push('DNS error');
+        if (network.latencyMs !== undefined) values.push(network.latencyMs + ' ms');
+        if (network.httpStatus !== undefined) values.push('HTTP ' + network.httpStatus);
+        if (network.modelsApi === 'available') values.push(network.modelCount === undefined ? 'Models OK' : network.modelCount + ' models');
+        if (network.modelsApi === 'httpError') values.push('Models error');
+        if (network.modelsApi === 'unreachable') values.push('Models unavailable');
+        row('Network', values, !network.ok || network.modelsApi === 'httpError' || network.modelsApi === 'unreachable');
+        info.push(formatNetwork(network) + ' | Checked: ' + time(network.checkedAt));
+      }
+      if (network || usage || usageEnabled) {
+        const values = usage ? usage.ok ? ['Remaining ' + usage.remaining + (usage.unit ? ' ' + usage.unit : '')] : [usage.error === 'Cancelled' ? 'Cancelled' : 'Unavailable'] : [usageEnabled ? 'Not tested' : 'Not enabled'];
+        if (usage && !usage.ok && usage.httpStatus !== undefined) values.push('HTTP ' + usage.httpStatus);
+        row('Usage', values, usage && !usage.ok);
+        if (usage) info.push(formatUsage(usage) + ' | Checked: ' + time(usage.checkedAt));
+      }
+      if (report) {
+        const summary = report.summary;
+        const rate = (value, unit) => summary.comparable && summary.succeeded > 0 && Number.isFinite(value) ? value.toFixed(2) + unit : 'N/A';
+        const values = ['Output ' + rate(summary.generationMedianTps, ' tok/s'), 'TTFT ' + rate(summary.ttftMedianMs === null ? null : summary.ttftMedianMs / 1000, ' s'), 'Overall ' + rate(summary.endToEndMedianTps, ' tok/s'), summary.succeeded + '/' + report.parameters.runs + ' passed', 'estimated'];
+        const stale = Date.now() - Date.parse(report.finishedAt) > 15 * 60 * 1000;
+        const buffered = report.rounds.some(round => round.metrics && round.metrics.timingSource === 'buffered-proxy');
+        if (stale) values.push('Stale');
+        if (summary.failed) values.push(summary.failed + ' failed');
+        if (summary.cancelled) values.push(summary.cancelled + ' cancelled');
+        if (!summary.comparable && summary.succeeded) values.push('Mixed conditions');
+        if (buffered) values.push('Buffered stream');
+        else if (summary.succeeded && summary.comparable && summary.generationMedianTps === null) values.push('Output timing unavailable');
+        row('Speed', values, stale || summary.failed || summary.cancelled || !summary.comparable);
+        const models = Array.from(new Set(report.rounds.filter(round => round.metrics).map(round => round.metrics.actualModel))).join(', ');
+        info.push('Speed: ' + time(report.finishedAt) + ' | Model: ' + (models || report.target.model));
+        info.push('Output = visible-text generation rate; TTFT = request to first text; Overall = throughput including first-text wait. tok/s means tokens per second, estimated locally. Comparable successful samples only; medians shown. Client startup and session preparation are excluded.');
+        if (buffered) info.push('The proxy buffers or rebuilds the stream; original generation timing is unavailable.');
+        else if (summary.succeeded && summary.comparable && summary.generationMedianTps === null) info.push('Text arrived in one batch or the timing interval was too short; no output rate is available.');
+        if (!summary.comparable && summary.succeeded) info.push('Mixed models or measurement conditions; aggregate metrics are suppressed.');
+        info.push('Fixed short-text benchmark, not live conversation monitoring. For work efficiency, compare time to a correct completed task on the same task and acceptance criteria.');
+      }
+      if (!container.children.length) return;
+      const details = add(container, 'details', 'diagnosticDetails');
+      add(details, 'summary', '', 'Details');
+      for (const text of info) add(details, 'p', '', text);
+      if (report) {
+        const query = add(details, 'button', '', 'Copy AI Speed Query');
+        query.type = 'button'; query.disabled = busy;
+        query.title = 'Choose a tool and copy a read-only command for its current provider. Reads stored results; no new model request.';
+        query.addEventListener('click', () => post({ type: 'copySpeedQuery' }));
+      }
     }
 
     function formatBytes(value) {

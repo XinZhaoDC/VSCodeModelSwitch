@@ -1,5 +1,11 @@
 # Native Claude and Codex proxy
 
+The separate [chat network proxy](network-proxy.md) can carry this API
+compatibility relay's outgoing requests through a VPN HTTP proxy. Local client
+calls stay direct. Existing per-provider settings below are unchanged. The
+transport description below applies when the explicit network proxy is off;
+when enabled, both remote HTTP and HTTPS use the selected explicit transport.
+
 Claude and Codex API providers can use **Direct connection** or a **Built-in proxy**. The proxy
 uses Node.js provided by the VS Code extension host; Python, Flask and external
 proxy terminals are not required. Install/run the extension in the same

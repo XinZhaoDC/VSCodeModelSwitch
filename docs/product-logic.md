@@ -14,6 +14,10 @@ VSCodeModelSwitch 是一个面向 VSCode 的 Claude Code 和 Codex provider 管�
 
 ## 核心原则
 
+0.5.0 主动测速及AI只读查询见 [speed-benchmark.md](speed-benchmark.md)。测速独立于
+Verify/Apply，使用临时连接或Codex会话；结果按模型和配置版本匹配，失败/取消/混杂样本
+保持独立状态。结果不参与Provider同步/导出；没有后台采样或MCP自动安装。
+
 1. 一个 provider 只属于一个工具：Claude Code 或 Codex。
 2. URL 和 key 是用户必须确认的最小输入。
 3. URL 和 key 是必要输入；Model ID 是可选输入。
@@ -496,3 +500,14 @@ Codex: <provider or url> / <model>
 - 加密导出。
 - 配置 diff 预览。
 - cc-switch 配置导入。
+# Chat network proxy (v0.6.0)
+
+The global sidebar Network proxy panel is independent from Provider `proxy`
+(API compatibility). It manages Codex editor HTTP proxy, Claude launch proxy
+variables and tool-terminal environments; original managed fields are stored in
+SecretStorage for Restore. It also selects the plugin's outgoing transport,
+including remote HTTP relay calls that previously used Node direct HTTP.
+Loopback routes remain direct, redirects recheck bypass, and TLS validation is
+enabled. Feature activation never rewrites API endpoints/account files. A real
+client restart is required; network reachability is not a chat success state.
+See [network proxy](network-proxy.md) for scope, rollback and acceptance.

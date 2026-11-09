@@ -26,7 +26,7 @@ class Memento {
 }
 const disposable = () => ({ dispose() {} });
 const logs = [];
-const settings = { globalCliSync: true, configTarget: 'sandbox', anthropicVersion: '2023-06-01' };
+const settings = { globalCliSync: true, configTarget: 'sandbox', testHome: process.env.VSCODEMODELSWITCH_TEST_HOME || path.join(__dirname, 'proxy-test-sandbox'), anthropicVersion: '2023-06-01' };
 const vscode = {
   window: {
     createOutputChannel: () => ({ info: s => logs.push(s), warn: s => logs.push(s), error: s => logs.push(s), show() {}, dispose() {} }),
@@ -43,7 +43,7 @@ const originalLoad = Module._load;
 Module._load = function (name, ...args) { return name === 'vscode' ? vscode : originalLoad.call(this, name, ...args); };
 
 let appliedClaude = {}, appliedCodex = {}, failWrite = false, writes = 0;
-const sandboxRoot = path.join(__dirname, 'proxy-test-sandbox');
+const sandboxRoot = settings.testHome;
 const { ClaudeAdapter } = require('../out/adapters/claudeAdapter');
 const { CodexAdapter } = require('../out/adapters/codexAdapter');
 ClaudeAdapter.prototype.getConfigPath = () => path.join(sandboxRoot, '.claude/settings.json');
@@ -380,6 +380,109 @@ function testUi() {
   check('confirmed API state updates the mode display and enables the official action', () => { assert.equal(elements.get('codexCurrentMode').textContent, 'Current mode: API'); assert.equal(elements.get('codexOfficialMode').disabled, false); assert.equal(messages.at(-1).mode, 'official'); });
   fire({ type: 'state', state: { ...officialState, apiStatuses: [{ tool: 'codex', mode: 'official', status: 'loginRequired' }], toolEnabled: { claude: true, codex: false } } });
   check('login-required state is explicit and disabling Codex locks both mode actions', () => { assert.match(elements.get('codexModeDetail').textContent, /Sign in/); assert.equal(elements.get('codexOfficialMode').disabled, true); assert.equal(elements.get('codexApiMode').disabled, true); });
+  const networkButton = name => elements.get(name + 'NetworkProxyButton');
+  const proxyConfig = { url: 'http://127.0.0.1:12000', noProxy: 'localhost,127.0.0.1,::1', claude: true, codex: true };
+  const networkState = config => ({ ...officialState, networkProxy: { config, message: config ? 'Restart clients' : 'Original settings restored' } });
+  fire({ type: 'state', state: networkState(undefined) });
+  check('network proxy Off has an explicit badge and a disabled current-state action', () => {
+    assert.match(elements.get('networkProxyBadge').textContent, /已停用.*Disabled/);
+    assert.equal(networkButton('apply').disabled, false); assert.equal(networkButton('restore').disabled, true);
+    assert.match(networkButton('apply').textContent, /启用代理.*Enable/);
+    assert.equal(networkButton('apply').className, 'primary');
+    const count = messages.length; networkButton('restore').listeners.click(); assert.equal(messages.length, count);
+  });
+  elements.get('networkProxyUrl').value = proxyConfig.url;
+  elements.get('networkProxyClaude').checked = true; elements.get('networkProxyCodex').checked = true;
+  elements.get('networkProxyUrl').listeners.input();
+  networkButton('test').listeners.click();
+  check('network proxy test sends its own settings without changing a provider', () => {
+    assert.equal(messages.at(-1).type, 'testNetworkProxy'); assert.equal(messages.at(-1).config.url, proxyConfig.url);
+    assert.equal(messages.at(-1).providerId, undefined);
+  });
+  check('network test immediately locks actions and inputs before host acknowledgement', () => {
+    assert.match(networkButton('test').textContent, /测试中/);
+    for (const name of ['test', 'apply', 'restore']) assert.equal(networkButton(name).disabled, true);
+    assert.equal(elements.get('networkProxyUrl').disabled, true);
+    const count = messages.length; networkButton('test').listeners.click(); networkButton('apply').listeners.click();
+    assert.equal(messages.length, count);
+  });
+  fire({ type: 'busy', busy: false });
+  networkButton('apply').listeners.click();
+  check('network proxy Apply targets both clients and does not optimistically report chat success', () => {
+    assert.equal(messages.at(-1).type, 'applyNetworkProxy'); assert.equal(messages.at(-1).config.claude, true);
+    assert.equal(messages.at(-1).config.codex, true); assert.match(elements.get('networkProxyBadge').textContent, /Disabled/);
+    assert.match(networkButton('apply').textContent, /应用中/);
+    const count = messages.length; networkButton('apply').listeners.click(); assert.equal(messages.length, count);
+  });
+  const enabledState = { ...officialState, networkProxy: { config: proxyConfig,
+    message: 'Restart clients', test: { checkedAt: 'fixture time', proxyUrl: proxyConfig.url, results: [{ target: 'https://fixture.invalid', reachable: true, status: 401 }] } } };
+  fire({ type: 'state', state: enabledState }); fire({ type: 'busy', busy: false });
+  check('network proxy display separates enabled configuration, transport reachability and chat verification', () => {
+    assert.match(elements.get('networkProxyStatus').textContent, /Enabled.*Restart/);
+    assert.match(elements.get('networkProxyTest').textContent, /HTTP 401/); assert.match(elements.get('networkProxyTest').textContent, /chat not verified/);
+    assert.equal(networkButton('restore').disabled, false);
+  });
+  check('enabled proxy badge and checked current button make the confirmed state visible', () => {
+    assert.match(elements.get('networkProxyBadge').textContent, /已启用.*Enabled/);
+    assert.match(elements.get('networkProxyBadge').className, /enabled/);
+    assert.equal(networkButton('apply').disabled, true);
+    assert.match(networkButton('apply').textContent, /✓ 已启用/);
+    assert.equal(networkButton('apply').className, 'networkProxyCurrent');
+    const count = messages.length; networkButton('apply').listeners.click(); assert.equal(messages.length, count);
+  });
+  elements.get('networkProxyUrl').value = 'http://127.0.0.1:12001'; elements.get('networkProxyUrl').listeners.input();
+  check('editing an enabled proxy exposes Apply changes while the active badge stays enabled', () => {
+    assert.equal(networkButton('apply').disabled, false); assert.match(networkButton('apply').textContent, /应用更改/);
+    assert.equal(networkButton('apply').className, 'primary');
+    assert.match(elements.get('networkProxyStatus').textContent, /更改待应用/);
+    assert.match(elements.get('networkProxyBadge').textContent, /Enabled/);
+  });
+  elements.get('networkProxyUrl').value = proxyConfig.url; elements.get('networkProxyUrl').listeners.input();
+  check('reverting a draft disables redundant Apply again', () => assert.equal(networkButton('apply').disabled, true));
+  elements.get('networkProxyUrl').value = '  ' + proxyConfig.url + '/  ';
+  elements.get('networkProxyBypass').value = '::1, localhost,127.0.0.1,localhost'; elements.get('networkProxyBypass').listeners.input();
+  check('URL trailing slash and bypass order or duplicates do not trigger a redundant Apply', () => assert.equal(networkButton('apply').disabled, true));
+  elements.get('networkProxyUrl').value = proxyConfig.url; elements.get('networkProxyBypass').value = proxyConfig.noProxy;
+  elements.get('networkProxyCodex').checked = false; elements.get('networkProxyCodex').listeners.input();
+  check('changing client selection enables Apply changes', () => assert.equal(networkButton('apply').disabled, false));
+  fire({ type: 'state', state: enabledState });
+  check('background state refresh preserves an unapplied draft', () => assert.equal(elements.get('networkProxyCodex').checked, false));
+  networkButton('apply').listeners.click();
+  fire({ type: 'error', action: 'applyNetworkProxy', message: 'Synthetic failure' });
+  fire({ type: 'busy', busy: false });
+  check('failed Apply preserves the draft and confirmed state, then unlocks retry', () => {
+    assert.equal(elements.get('networkProxyCodex').checked, false);
+    assert.equal(networkButton('apply').disabled, false); assert.equal(elements.get('networkProxyUrl').disabled, false);
+    assert.match(elements.get('networkProxyBadge').textContent, /Enabled/);
+    assert.match(networkButton('apply').textContent, /Apply changes/);
+  });
+  networkButton('apply').listeners.click();
+  fire({ type: 'state', state: networkState({ ...proxyConfig, codex: false }) });
+  fire({ type: 'busy', busy: false });
+  check('successful changed Apply confirms settings and disables the current action', () => {
+    assert.equal(elements.get('networkProxyCodex').checked, false); assert.equal(networkButton('apply').disabled, true);
+  });
+  networkButton('restore').listeners.click();
+  check('network proxy Restore is independent from API compatibility proxy controls', () => assert.equal(messages.at(-1).type, 'restoreNetworkProxy'));
+  check('Restore immediately locks repeated actions without prematurely showing disabled', () => {
+    assert.match(networkButton('restore').textContent, /停用中/); assert.equal(networkButton('restore').disabled, true);
+    assert.match(elements.get('networkProxyBadge').textContent, /Enabled/);
+    const count = messages.length; networkButton('restore').listeners.click(); assert.equal(messages.length, count);
+  });
+  fire({ type: 'error', action: 'restoreNetworkProxy', message: 'Synthetic restore failure' }); fire({ type: 'busy', busy: false });
+  check('failed Restore keeps Enabled visible and allows retry', () => {
+    assert.match(elements.get('networkProxyBadge').textContent, /Enabled/); assert.equal(networkButton('restore').disabled, false);
+  });
+  networkButton('restore').listeners.click();
+  fire({ type: 'state', state: networkState(undefined) }); fire({ type: 'busy', busy: false });
+  check('confirmed Restore marks Disabled and blocks repeated Restore after busy clears', () => {
+    assert.match(elements.get('networkProxyBadge').textContent, /Disabled/);
+    assert.equal(networkButton('restore').disabled, true); assert.equal(networkButton('apply').disabled, false);
+    const count = messages.length; networkButton('restore').listeners.click(); assert.equal(messages.length, count);
+  });
+  fire({ type: 'busy', busy: true }); fire({ type: 'busy', busy: false });
+  check('unrelated busy transitions retain state-specific button locks', () => assert.equal(networkButton('restore').disabled, true));
+
 }
 
 async function testCodexApplication(base, offered) {

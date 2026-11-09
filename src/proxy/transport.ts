@@ -1,4 +1,5 @@
 import * as http from 'http';
+import { isNetworkProxied, networkFetch } from '../network/transport';
 
 export interface HttpReply { status: number; headers: http.IncomingHttpHeaders; body: Buffer }
 
@@ -15,7 +16,7 @@ export function requestHttp(url: string, method: string, headers: Record<string,
   // Node transport. This also avoids gateways that reject fetch's streaming
   // framing for large HTTP bodies. HTTPS relays use extension-host fetch below
   // so they follow the VS Code Server host-proxy route.
-  if (target.protocol === 'http:') return requestNodeHttp(target, method, headers, body, signal);
+  if (target.protocol === 'http:' && !isNetworkProxied(target)) return requestNodeHttp(target, method, headers, body, signal);
   const requestHeaders = { ...headers };
   // The previous Node http client emitted a fixed Content-Length. Some relay
   // gateways reject a chunked request body even though the JSON is valid.
@@ -23,7 +24,7 @@ export function requestHttp(url: string, method: string, headers: Record<string,
   if (body && !Object.keys(requestHeaders).some(key => key.toLowerCase() === 'content-length')) {
     requestHeaders['content-length'] = String(body.byteLength);
   }
-  return fetch(target, {
+  return networkFetch(target, {
     method,
     headers: requestHeaders,
     body: body ? new Uint8Array(body) : undefined,

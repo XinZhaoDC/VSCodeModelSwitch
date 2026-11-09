@@ -2,7 +2,7 @@
   "name": "vscodemodelswitch",
   "displayName": "VSCodeModelSwitch",
   "description": "AI CLI provider switcher for Claude Code and Codex in VSCode.",
-  "version": "0.4.0",
+  "version": "0.6.2",
   "publisher": "xinzhaodc",
   "icon": "media/switch_889728.png",
   "license": "SEE LICENSE IN THIRD_PARTY_NOTICES.md",
@@ -97,6 +97,14 @@
       {
         "command": "vscodemodelswitch.importPublicConfig",
         "title": "VSCodeModelSwitch: Import Public Config"
+      },
+      {
+        "command": "vscodemodelswitch.speedTest",
+        "title": "VSCodeModelSwitch: Run Speed Test"
+      },
+      {
+        "command": "vscodemodelswitch.copySpeedQuery",
+        "title": "VSCodeModelSwitch: Copy AI Speed Query"
       }
     ],
     "configuration": {
@@ -125,6 +133,11 @@
           "type": "string",
           "default": "2023-06-01",
           "description": "Anthropic API version header used when fetching Claude-compatible model lists."
+        },
+        "vscodemodelswitch.codexExecutablePath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional absolute Codex executable path for official-account speed tests. Empty uses the installed Codex extension binary or PATH."
         }
       }
     }
@@ -137,7 +150,9 @@
     "package": "vsce package",
     "test:proxy": "npm run compile && node scripts/test-proxy.js",
     "test:codex-modes": "npm run compile && node scripts/test-codex-modes.js",
-    "test:codex-proxy": "npm run compile && node scripts/test-codex-proxy.js"
+    "test:codex-proxy": "npm run compile && node scripts/test-codex-proxy.js",
+    "test:speed": "npm run compile && node scripts/test-speed.js",
+    "test:network": "npm run compile && node scripts/test-network.js"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
@@ -148,5 +163,9 @@
   },
   "extensionKind": [
     "workspace"
-  ]
+  ],
+  "dependencies": {
+    "js-tiktoken": "1.0.21",
+    "undici": "7.25.0"
+  }
 }

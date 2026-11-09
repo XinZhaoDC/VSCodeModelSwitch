@@ -1,3 +1,4 @@
+import { isNetworkProxied, networkFetch } from '../network/transport';
 import { promises as dns } from 'dns';
 import * as vscode from 'vscode';
 import { ModelInfo, NetworkTestResult, ProxyConfig, ToolId } from '../types';
@@ -39,7 +40,7 @@ export async function fetchModels(tool: ToolId, baseUrl: string, apiKey: string,
       signal?.addEventListener('abort', cancel, { once: true });
       const timer = setTimeout(() => controller.abort(), 12_000);
       try {
-        const response = await fetch(url, { method: 'GET', headers, signal: controller.signal });
+        const response = await networkFetch(url, { method: 'GET', headers, signal: controller.signal });
         if (!response.ok) {
           errors.push(`${url}: HTTP ${response.status}`);
           if (!isAuthenticationStatus(response.status)) break;
@@ -213,7 +214,7 @@ async function requestText(
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   const startedAt = performance.now();
   try {
-    const response = await fetch(endpoint, { method: 'GET', headers, signal: controller.signal });
+    const response = await networkFetch(endpoint, { method: 'GET', headers, signal: controller.signal });
     const text = await response.text();
     return { response, text, latencyMs: Math.round(performance.now() - startedAt) };
   } catch (error) {
@@ -232,6 +233,7 @@ async function requestText(
 type DnsResult = Pick<NetworkTestResult, 'resolvedAddresses' | 'dnsMode' | 'dnsError'>;
 
 async function resolveEndpointDns(baseUrl: string): Promise<DnsResult> {
+  if (isNetworkProxied(baseUrl)) return {}; // The proxy resolves remote names; local DNS cannot veto it.
   try {
     const url = new URL(baseUrl);
     const addresses = [...new Set((await dns.lookup(url.hostname, { all: true })).map((item) => item.address))];

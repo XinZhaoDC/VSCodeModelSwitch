@@ -3,6 +3,8 @@
 original/**
 docs/**
 !docs/native-proxy.md
+!docs/speed-benchmark.md
+!docs/network-proxy.md
 AI_Prompt/**
 src/**
 *.ts

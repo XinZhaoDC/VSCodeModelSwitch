@@ -1,3 +1,4 @@
+import { networkFetch } from '../network/transport';
 import { CompatibilityResult, ProxyConfig, ToolId } from '../types';
 import { buildAuthHeaderCandidates, buildCompatibilityUrl } from './modelFetcher';
 import { resolveProxyOptions } from '../proxy/config';
@@ -31,7 +32,7 @@ export async function verifyModel(
     const timer = setTimeout(() => controller.abort(), proxy ? resolveProxyOptions(proxy).timeoutMs + 1000 : 20_000);
     const startedAt = performance.now();
     try {
-      const response = await fetch(endpoint, {
+      const response = await networkFetch(endpoint, {
         method: 'POST',
         headers: { ...authHeaders, 'content-type': 'application/json' },
         body,

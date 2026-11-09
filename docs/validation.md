@@ -1,5 +1,13 @@
 # VSCodeModelSwitch Validation Guide
 
+## Speed tests — v0.5.0
+
+Run `npm run test:speed` for loopback SSE, synthetic official Codex, read-only
+queries, model/configuration freshness, cancellation and UI/controller checks.
+Keep existing proxy/mode regressions. See [measurement definitions and real-test
+boundaries](speed-benchmark.md). Real requests consume quota and must be reported
+separately from mocks; packaging does not activate an already-installed extension.
+
 This project can be validated locally without publishing to the VSCode Marketplace.
 
 ## Codex proxy and mode status — v0.4.0 — 2026-10-22
@@ -372,3 +380,41 @@ Expected:
 
 - A `.vsix` file is generated.
 - It can be installed from VSCode with `Extensions: Install from VSIX...`.
+# v0.6.0 network proxy acceptance
+
+Run `npm run test:network` for synthetic editor Apply/reapply/restore/failure
+behavior, HTTP CONNECT with remote-name resolution, direct loopback bypass,
+redirect credential/bypass behavior, SSE and cancellation, API compatibility
+relay composition, and verified HTTPS fixture certificates. Run existing proxy,
+Codex mode/protocol and speed suites for regressions. No real account/model
+requests are needed for these tests.
+
+Then install the new VSIX manually. Keep the working host TUN mode while
+applying `http://127.0.0.1:12000`, restart clients and check a real conversation.
+Only afterward test host system-proxy mode with TUN off. Test both clients and
+the API compatibility relay if used; port/HTTPS/mock success cannot replace this
+acceptance. Restore original settings via Disable / Restore before downgrade.
+See [network proxy](network-proxy.md).
+
+## v0.6.1 Apply snapshot regression
+
+The editor fixture in `scripts/test-network.js` now gives each getConfiguration
+handle a fixed get() snapshot, while inspect()/update() use the latest model,
+matching the installed VS Code extension host. With this fixture, the v0.6.0
+manager reproduces the user's false HTTP override error on first Apply. The fix
+must pass first Apply, reapply, target changes, reload, restore and rollback;
+real HTTP and Claude workspace overrides must still reject Apply without
+leaving either client's settings or saved state changed. Use `npm run check`,
+`npm run test:network` and `npm run test:proxy`. No live credentials/model calls
+are involved; real UI Apply and system-proxy chat acceptance remain separate.
+
+## v0.6.2 Network proxy state controls
+
+`npm run test:proxy` now checks explicit Off/Enabled badges and state-specific
+button styles/locks, immediate submit locking, duplicate click suppression,
+URL/bypass equivalence, edited and reverted drafts, target selection, background
+refresh, successful Apply/Restore, failure/retry and generic busy transitions.
+The fixture runs the actual webview script with synthetic messages/settings;
+it does not apply real client settings or claim visual browser acceptance.
+TypeScript check/compile and 82 UI/relay checks pass. The existing Enabled
+configuration is retained after installing/reloading this UI update.

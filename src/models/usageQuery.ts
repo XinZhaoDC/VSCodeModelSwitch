@@ -1,3 +1,4 @@
+import { networkFetch } from '../network/transport';
 import { UsageQueryConfig, UsageQueryResult } from '../types';
 
 export function defaultUsageQuery(baseUrl: string): UsageQueryConfig {
@@ -161,7 +162,7 @@ async function queryUsageEndpoint(
   signal?.addEventListener('abort', cancel, { once: true });
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(endpoint, {
+    const response = await networkFetch(endpoint, {
       method: 'GET',
       headers,
       signal: controller.signal

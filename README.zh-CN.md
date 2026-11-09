@@ -1,5 +1,21 @@
 # VSCodeModelSwitch
 
+0.6.0 新增 **通过 VPN 联网 / Network proxy** 面板：统一设置 Claude Code、
+Codex 的聊天联网代理，并覆盖插件自身的 API 转发、模型查询和测速请求。
+默认关闭，支持连接测试、应用与恢复；保留已有 API 兼容代理功能。
+当前 host-network 容器可使用 `http://127.0.0.1:12000`，无需更改 Docker 网络。
+应用后先保持 TUN 开启、重启客户端，再验证宿主机系统代理模式下的真实聊天。
+连接测试通过不代表账号或聊天已验证。详见[网络代理说明](docs/network-proxy.md)。
+
+0.5.2 统一 Network / Usage / Speed 为紧凑结果行，测速按钮恢复英文；
+时间、DNS、端点与计量说明收进默认折叠的 **Details**，其中可找到 **Copy AI Speed Query**。
+该按钮先选择工具，再复制读取其当前Provider本地测速记录的命令；不发起新请求、不监控当前会话。
+
+0.5.0 新增 **Quick Speed Test**（1次请求）、**Standard Speed Test**（串行3次）、
+本地指标报告和 **Copy AI Speed Query**。API Provider 使用保存的连接，官方 Codex 使用临时
+会话。测速消耗额度，查询结果不调用模型。首字等待、生成阶段估算速度和全程吞吐分开显示；
+缓冲重建流不显示原始生成速度。详见[测速与AI查询](docs/speed-benchmark.md)。
+
 [English](README.md) | 简体中文
 
 VSCodeModelSwitch 是一个管理和切换 Claude Code、Codex API Provider 的

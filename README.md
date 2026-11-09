@@ -1,5 +1,18 @@
 # VSCodeModelSwitch
 
+0.6.0 adds **通过 VPN 联网 / Network proxy**: shared HTTP proxy settings for
+Claude Code, Codex and the extension's outgoing API/model/speed requests.
+It is off by default, supports connection testing and Apply/Restore, and keeps
+the existing API compatibility proxy independent. The current host-network
+container can use `http://127.0.0.1:12000` without Docker network changes.
+Restart clients while TUN remains on, then separately verify real chat with the
+host VPN in system-proxy mode. See [network proxy](docs/network-proxy.md).
+
+0.5.0 adds **Quick Speed Test** (one request), **Standard Speed Test** (three serial
+requests), local metric reports and **Copy AI Speed Query**. API Providers use
+their saved connection; official Codex uses a temporary session. Tests use quota;
+reading results does not. See [speed tests and AI queries](docs/speed-benchmark.md).
+
 Claude and Codex API providers support a native TypeScript **Built-in proxy** with a
 justdowork preset and per-provider advanced overrides. Configure it in Add
 Provider or an existing provider's Config editor; Save retains upstream

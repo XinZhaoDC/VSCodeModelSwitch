@@ -1,3 +1,4 @@
+import { networkFetch } from '../network/transport';
 import { randomUUID } from 'crypto';
 import * as http from 'http';
 import { ProxyConfig, ProxyOptions, ProxyRuntime, ToolId } from '../types';
@@ -226,7 +227,7 @@ export class ProxyServer {
       if (signal.aborted) throw new Error('Request cancelled');
       if (attempt) stats.retries++;
       try {
-        response = await fetch(upstreamUrl(route.baseUrl, route.options.messagesPath), { method: 'POST', headers: { ...this.headers(route), 'content-length': String(Buffer.byteLength(body)) }, body, signal, redirect: 'manual' });
+        response = await networkFetch(upstreamUrl(route.baseUrl, route.options.messagesPath), { method: 'POST', headers: { ...this.headers(route), 'content-length': String(Buffer.byteLength(body)) }, body, signal, redirect: 'manual' });
         if (response.ok && response.headers.get('content-type')?.includes('text/event-stream')) break;
         const status = response.status;
         await response.body?.cancel();
@@ -294,7 +295,7 @@ export class ProxyServer {
     for (let attempt = 0; attempt < route.options.maxAttempts; attempt++) {
       if (attempt) stats.retries++;
       try {
-        const next = await fetch(upstreamUrl(route.baseUrl, route.options.messagesPath), { method: 'POST', headers: this.headers(route), body: JSON.stringify(payload), signal });
+        const next = await networkFetch(upstreamUrl(route.baseUrl, route.options.messagesPath), { method: 'POST', headers: this.headers(route), body: JSON.stringify(payload), signal });
         if (next.ok && next.body) { response = next; break; }
         const raw = await next.text();
         const retryable = [408, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524, 529].includes(next.status) || (next.status === 403 && !raw && route.config.preset === 'justdowork');

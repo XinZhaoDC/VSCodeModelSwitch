@@ -1,5 +1,5 @@
 import * as fs from 'fs/promises';
-import { basename, dirname } from 'path';
+import { basename, dirname, join } from 'path';
 import * as vscode from 'vscode';
 import { ClaudeAdapter } from './adapters/claudeAdapter';
 import { CodexAdapter } from './adapters/codexAdapter';
@@ -28,6 +28,16 @@ import { normalizeProxyConfig } from './proxy/config';
 import { ProxyServer } from './proxy/server';
 import { managedProxyId, proxyClientConfig } from './proxy/applied';
 import { ProxyConfig } from './types';
+import { measureApi } from './speed/api';
+import { measureOfficialCodex } from './speed/codex';
+import { runSpeedBenchmark } from './speed/runner';
+import { SpeedStore, sameSpeedTarget } from './speed/store';
+import { SpeedTarget, record as speedRecord } from './speed/types';
+import { resolveHomePath } from './utils/paths';
+import { buildAuthHeaderCandidates, buildCompatibilityUrl } from './models/modelFetcher';
+import { resolveProxyOptions } from './proxy/config';
+import { NetworkProxyManager } from './network/manager';
+import { NetworkProxyConfig, disposeNetworkTransport, testNetworkProxy } from './network/transport';
 
 type MenuAction =
   | 'switchProvider'
@@ -65,8 +75,13 @@ export class VSModelSwitchApp implements vscode.Disposable {
   private readonly appliedRevisions = new Map<string, string>();
   private disposed = false;
   private restoreAttempted = false;
+  private speedStore: SpeedStore;
+  private speedController?: AbortController;
+  private readonly networkProxy: NetworkProxyManager;
 
   constructor(private readonly context: vscode.ExtensionContext) {
+    this.networkProxy = new NetworkProxyManager(context);
+    this.speedStore = new SpeedStore(resolveHomePath('.vscodemodelswitch', 'speed'));
     this.outputChannel = vscode.window.createOutputChannel('VSCodeModelSwitch', { log: true });
     this.proxyServer = new ProxyServer(() => { if (!this.disposed) this.refreshStatus(); }, message => { if (!this.disposed) this.outputChannel.info(message); });
     this.store = new ProviderStore(context);
@@ -96,6 +111,9 @@ export class VSModelSwitchApp implements vscode.Disposable {
 
   dispose(): void {
     this.disposed = true;
+    this.speedController?.abort();
+    this.networkProxy.dispose();
+    disposeNetworkTransport();
     this.proxyServer.dispose();
     this.statusBar.dispose();
     this.outputChannel.dispose();
@@ -127,6 +145,8 @@ export class VSModelSwitchApp implements vscode.Disposable {
     register('vscodemodelswitch.viewCodexConfig', () => this.viewConfig('codex'));
     register('vscodemodelswitch.exportPublicConfig', () => this.exportPublicConfig());
     register('vscodemodelswitch.importPublicConfig', () => this.importPublicConfig());
+    register('vscodemodelswitch.speedTest', () => this.chooseSpeedTest());
+    register('vscodemodelswitch.copySpeedQuery', () => this.copySpeedQuery());
   }
 
   async getSidebarState(): Promise<SidebarViewState> {
@@ -142,8 +162,18 @@ export class VSModelSwitchApp implements vscode.Disposable {
     ]);
     const codexMode = this.runtimeState.codex.mode ?? 'unknown';
 
+    const speedReports = await this.speedStore.readAll();
+    for (const provider of providers) {
+      const saved = this.store.getProvider(provider.id);
+      const target = saved?.codexMode === 'official' ? this.currentSpeedTargets().codex : saved ? this.providerSpeedTarget(saved) : undefined;
+      if (target) provider.speedResult = speedReports.find(report => sameSpeedTarget(report.target, target));
+    }
+    const officialTarget = this.currentSpeedTargets().codex;
     return {
+      networkProxy: this.networkProxy.state(),
       providers,
+      officialSpeedResult: officialTarget?.mode === 'official' ? await this.speedStore.latest(officialTarget) : undefined,
+      speedDirectory: this.speedStore.directory,
       currentProviderIds: this.store.getCurrentProviderIds(),
       status: this.status,
       globalCliSync: vscode.workspace.getConfiguration('vscodemodelswitch').get<boolean>('globalCliSync', true),
@@ -169,6 +199,30 @@ export class VSModelSwitchApp implements vscode.Disposable {
 
   async reloadStateFromSidebar(): Promise<void> {
     await this.initializeCurrentProviders();
+  }
+
+  async applyNetworkProxyFromSidebar(config: NetworkProxyConfig): Promise<void> {
+    if (this.speedController) throw new Error('Finish or cancel the speed test before changing the network proxy');
+    await this.networkProxy.apply(config);
+    await this.refreshNetworkDiagnostics();
+  }
+
+  async restoreNetworkProxyFromSidebar(): Promise<void> {
+    if (this.speedController) throw new Error('Finish or cancel the speed test before changing the network proxy');
+    await this.networkProxy.restore();
+    await this.refreshNetworkDiagnostics();
+  }
+
+  async testNetworkProxyFromSidebar(config: NetworkProxyConfig): Promise<void> {
+    this.networkProxy.setTest(await testNetworkProxy(config));
+    this.refreshStatus();
+  }
+
+  private async refreshNetworkDiagnostics(): Promise<void> {
+    this.networkTests.clear(); this.usageResults.clear(); this.compatibilityResults.clear();
+    await this.speedStore.writeCurrent({ updatedAt: new Date().toISOString(), tools: this.currentSpeedTargets() })
+      .catch(() => this.outputChannel.warn('Network proxy changed, but the current speed-query snapshot could not be refreshed.'));
+    this.refreshStatus();
   }
 
   async setToolEnabledFromSidebar(tool: ToolId, enabled: boolean): Promise<void> {
@@ -462,6 +516,125 @@ export class VSModelSwitchApp implements vscode.Disposable {
     this.refreshStatus();
   }
 
+  private providerSpeedTarget(provider: ProviderProfile): SpeedTarget {
+    const model = provider.modelPolicy.type === 'fixed' || provider.modelPolicy.type === 'custom'
+      ? provider.modelPolicy.model : provider.modelPolicy.type === 'providerAuto' ? provider.modelPolicy.preferred ?? 'auto' : 'auto';
+    return { tool: provider.tool, mode: provider.codexMode === 'official' ? 'official' : 'api', providerId: provider.id, providerName: provider.name, model, configRevision: this.networkRevision(provider.updatedAt) };
+  }
+
+  private networkRevision(revision: string): string {
+    const config = this.networkProxy?.state().config;
+    return config ? revision + ':network:' + fingerprintSecret(JSON.stringify(config)) : revision;
+  }
+
+  private currentSpeedTargets(): Partial<Record<ToolId, SpeedTarget>> {
+    const targets: Partial<Record<ToolId, SpeedTarget>> = {};
+    for (const tool of ['claude', 'codex'] as ToolId[]) {
+      if (!this.store.getToolEnabled(tool)) continue;
+      const runtime = this.runtimeState[tool];
+      if (tool === 'codex' && runtime.mode === 'official') {
+        const model = runtime.model || 'auto';
+        targets.codex = { tool, mode: 'official', providerId: 'codex-official', providerName: 'Official account', model, configRevision: this.networkRevision('official:' + model) };
+      } else if (runtime.matchedProviderId) {
+        const provider = this.store.getProvider(runtime.matchedProviderId);
+        if (provider) targets[tool] = { ...this.providerSpeedTarget(provider), model: runtime.model || this.providerSpeedTarget(provider).model, configRevision: this.networkRevision(this.appliedRevisions.get(provider.id) ?? provider.updatedAt) };
+      }
+    }
+    return targets;
+  }
+
+  private async codexSpeedExecutable(): Promise<string> {
+    const configured = vscode.workspace.getConfiguration('vscodemodelswitch').get<string>('codexExecutablePath', '').trim();
+    if (configured) return configured;
+    const extension = vscode.extensions.getExtension('openai.chatgpt');
+    const platform = process.platform === 'darwin' ? 'darwin' : process.platform === 'win32' ? 'windows' : 'linux';
+    if (extension) {
+      const architecture = process.arch === 'x64' ? 'x86_64' : process.arch === 'arm64' ? 'aarch64' : process.arch;
+      for (const name of [platform + '-' + architecture, platform + '-' + process.arch]) {
+        const candidate = join(extension.extensionPath, 'bin', name, process.platform === 'win32' ? 'codex.exe' : 'codex');
+        if (await pathExists(candidate)) return candidate;
+      }
+    }
+    return 'codex';
+  }
+
+  async speedTestFromSidebar(providerId: string | undefined, runs: 1 | 3): Promise<void> {
+    if (runs !== 1 && runs !== 3) throw new Error('Choose one or three speed samples');
+    if (this.speedController) throw new Error('A speed test is already running');
+    const provider = providerId ? this.store.getProvider(providerId) : undefined;
+    if (providerId && !provider) throw new Error('Provider not found');
+    const target = provider ? this.providerSpeedTarget(provider) : this.currentSpeedTargets().codex;
+    if (!target) throw new Error('Select an official Codex account or an API provider first');
+    this.ensureToolEnabled(target.tool);
+    // Official probes must use the active official login, never silently switch an API account.
+    if (target.mode === 'official' && this.runtimeState.codex.mode !== 'official') throw new Error('Select official Codex mode before testing that account');
+    if (target.mode === 'official' && provider) {
+      const current = this.currentSpeedTargets().codex!;
+      Object.assign(target, current);
+    }
+    if (target.mode === 'api' && target.model === 'auto') throw new Error('Choose a model before running an API speed test');
+    const controller = new AbortController(); this.speedController = controller;
+    const speedStore = this.speedStore;
+    const probeId = (provider?.id ?? 'codex-official') + '--speed-' + randomUUID();
+    const effort = target.mode === 'official' || target.tool === 'codex' && provider?.codex?.wireApi !== 'chat' ? 'low' : 'provider-default';
+    let registered = false;
+    try {
+      const key = provider && target.mode === 'api' ? await this.secretStore.get(provider.secretRef) : undefined;
+      if (target.mode === 'api' && !key) throw new Error('Provider API key is missing');
+      let endpoint = { baseUrl: provider?.baseUrl ?? '', key: key ?? '' };
+      if (provider?.proxy?.mode === 'proxy' && target.mode === 'api') {
+        endpoint = await this.proxyServer.register(probeId, provider.baseUrl, key!, target.model, normalizeProxyConfig(provider.proxy, provider.tool), provider.tool);
+        registered = true;
+      }
+      const proxyOptions = provider?.proxy?.mode === 'proxy' ? resolveProxyOptions(provider.proxy) : undefined;
+      const protocol = target.tool === 'claude' ? 'anthropic' : provider?.proxy?.mode !== 'proxy' && provider?.codex?.wireApi === 'chat' ? 'chat' : 'responses';
+      const codexExecutable = target.mode === 'official' ? await this.codexSpeedExecutable() : '';
+      const report = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: `Speed test: ${target.providerName} (${runs} paid sample${runs === 1 ? '' : 's'})`, cancellable: true },
+        async (progress, token) => {
+          const cancellation = token.onCancellationRequested(() => controller.abort());
+          try {
+            if (token.isCancellationRequested) controller.abort();
+            return await runSpeedBenchmark(target, runs, signal => target.mode === 'official'
+              ? measureOfficialCodex(codexExecutable, target.model, effort, signal, dirname(this.codexAdapter.getConfigPath()), this.networkProxy.environment('codex'))
+              : measureApi({ protocol, url: buildCompatibilityUrl(target.tool, endpoint.baseUrl).replace(/\/responses$/, protocol === 'chat' ? '/chat/completions' : '/responses'),
+                  headers: Object.assign({}, ...buildAuthHeaderCandidates(target.tool, endpoint.key)), model: target.model, effort,
+                  maxOutputTokens: 512, signal, timingSource: proxyOptions?.rebuildStream ? 'buffered-proxy' : 'native-stream' }),
+              { signal: controller.signal, effort, timeoutMs: 120_000, maxOutputTokens: target.mode === 'official' ? null : 512, progress: index => progress.report({ message: `Sample ${index}/${runs}` }) });
+          } finally { cancellation.dispose(); }
+        });
+      report.connection = { mode: target.mode === 'official' ? 'codex-app-server' : registered ? 'built-in-proxy' : 'direct', protocol: target.mode === 'official' ? 'codex-app-server' : protocol,
+        ...(proxyOptions ? { proxyMaxAttempts: proxyOptions.maxAttempts, proxyMaxOutputTokens: proxyOptions.maxOutputTokens, proxyTimeoutMs: proxyOptions.timeoutMs, proxyRebuildStream: proxyOptions.rebuildStream, proxyThinkingBudget: proxyOptions.extraThinkingBudget,
+          upstreamEffort: String(speedRecord(proxyOptions.parameters.reasoning).effort ?? speedRecord(proxyOptions.parameters.output_config).effort ?? effort) } : {}) };
+      await speedStore.save(report);
+      await speedStore.writeCurrent({ updatedAt: new Date().toISOString(), tools: this.currentSpeedTargets() });
+      this.outputChannel.info(`speed: ${report.id} ${report.summary.succeeded}/${report.parameters.runs} samples; results ${speedStore.directory}`);
+      if (report.summary.failed) void vscode.window.showWarningMessage(`Speed test stopped after a failed sample. See the saved result: ${speedStore.directory}`);
+    } finally {
+      if (registered) this.proxyServer.remove(probeId);
+      this.speedController = undefined;
+      this.refreshStatus();
+    }
+  }
+
+  private async chooseSpeedTest(): Promise<void> {
+    const items: Array<vscode.QuickPickItem & { providerId?: string }> = this.store.getProviders().filter(provider => provider.codexMode !== 'official').map(provider => ({ label: provider.name, description: provider.tool, providerId: provider.id }));
+    if (this.runtimeState.codex.mode === 'official') items.unshift({ label: 'Official Codex account' });
+    const chosen = await vscode.window.showQuickPick(items, { title: 'Choose speed-test connection (uses model quota)' });
+    if (!chosen) return;
+    const count = await vscode.window.showQuickPick([{ label: 'Quick: one sample', runs: 1 as const }, { label: 'Standard: three samples', runs: 3 as const }], { title: 'Fixed short text; each sample uses model quota' });
+    if (count) await this.speedTestFromSidebar(chosen.providerId, count.runs);
+  }
+
+  async copySpeedQuery(): Promise<void> {
+    const tool = await vscode.window.showQuickPick(['codex', 'claude'], { title: 'Copy read-only AI speed query command' });
+    if (!tool) return;
+    const quote = (value: string) => process.platform === 'win32' ? "'" + value.replace(/'/g, "''") + "'" : "'" + value.replace(/'/g, "'\"'\"'") + "'";
+    const command = `node ${quote(join(this.context.extensionUri.fsPath, 'out', 'speed', 'query.js'))} --tool ${tool} --directory ${quote(this.speedStore.directory)}`;
+    await vscode.env.clipboard.writeText(command);
+    void vscode.window.showInformationMessage('Read-only query copied. Run it in a Node.js terminal, or give it to your AI. It does not make a model request.');
+  }
+
   async deleteProviderFromSidebar(providerId: string): Promise<void> {
     const provider = this.store.getProvider(providerId);
     if (!provider) throw new Error('Provider not found');
@@ -599,6 +772,7 @@ export class VSModelSwitchApp implements vscode.Disposable {
   }
 
   private async scanCurrentProvidersFromConfig(): Promise<void> {
+    this.speedStore = new SpeedStore(resolveHomePath('.vscodemodelswitch', 'speed'));
     const providers = this.store.getProviders();
     const [claudeConfig, codexConfig]: [
       { baseUrl?: string; model?: string; key?: string },
@@ -651,6 +825,7 @@ export class VSModelSwitchApp implements vscode.Disposable {
         : codexMode === 'unknown' ? 'degraded' : await this.determineToolStatus('codex', providers, codex, effectiveCodex.baseUrl, effectiveCodex.key),
       configPath: this.codexAdapter.getConfigPath()
     };
+    await this.speedStore.writeCurrent({ updatedAt: new Date().toISOString(), tools: this.currentSpeedTargets() });
   }
 
   private async determineToolStatus(
@@ -1145,12 +1320,12 @@ export class VSModelSwitchApp implements vscode.Disposable {
       void vscode.window.showWarningMessage('Claude Code provider is not configured.');
       return;
     }
-    this.terminalManager.openClaude(this.lastEnv);
+    this.terminalManager.openClaude({ ...this.lastEnv, ...this.networkProxy.environment('claude') });
   }
 
   private async openCodexTerminal(): Promise<void> {
     if (await this.codexAdapter.readMode() === 'official') {
-      this.terminalManager.openCodex(this.lastEnv);
+      this.terminalManager.openCodex({ ...this.lastEnv, ...this.networkProxy.environment('codex') });
       return;
     }
     const resolved = await this.applyProvider('codex');
@@ -1158,7 +1333,7 @@ export class VSModelSwitchApp implements vscode.Disposable {
       void vscode.window.showWarningMessage('Codex provider is not configured.');
       return;
     }
-    this.terminalManager.openCodex(this.lastEnv);
+    this.terminalManager.openCodex({ ...this.lastEnv, ...this.networkProxy.environment('codex') });
   }
 
   private async viewConfig(tool: ToolId): Promise<void> {
