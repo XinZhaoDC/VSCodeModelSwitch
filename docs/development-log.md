@@ -165,3 +165,7 @@
 当前会话历史链接指向共享目录；匿名公共页代理连接通过；当前官方扩展目录没有独立dispatcher，因此真实聊天是否使用新版独立入口仍待用户显式应用/重载验收。Windows/WSL未实现或未测试的边界未变。未读写认证正文、切换真实账号、应用真实代理或改动VPN。
 
 按用户授权准备源码commit/tag/push及本地与GitHub仓库目标名AgentDeck。内部publisher/name、命令ID、配置键、数据键和隔离Node环境名称保留，避免已有配置失效。确切远程更名、提交与tag结果以同任务RESULT及Git为准；若GitHub管理接口不可用，不把仅修改git remote地址算作仓库已更名。更新本地源码路径对应的开发环境入口，并补充[开发交接](development-handoff.md)与[宿主机验收提示词](host-acceptance.md)。后续Claude页面对齐只是待开始阶段，本轮未实现。
+
+## 2026-11-12：GitHub 仓库更名完成
+
+用户确认已在GitHub更名，经公开仓库API核对为XinZhaoDC/AgentDeck。同步本地origin为git@github.com:XinZhaoDC/AgentDeck.git，更新package.json的repository/bugs/homepage、两份README及开发交接。原v0.10.0 tag和功能发布提交保持不变，另做仓库元数据提交；没有改运行代码、扩展ID、用户数据或重新安装。只做JSON/链接/差异检查及远程HEAD/tag核验，不重复功能测试。历史日志中的旧仓库名保留为当时事实。

@@ -8,12 +8,12 @@
   "license": "SEE LICENSE IN THIRD_PARTY_NOTICES.md",
   "repository": {
     "type": "git",
-    "url": "git+ssh://git@github.com/XinZhaoDC/VSCodeModelSwitch.git"
+    "url": "git+ssh://git@github.com/XinZhaoDC/AgentDeck.git"
   },
   "bugs": {
-    "url": "https://github.com/XinZhaoDC/VSCodeModelSwitch/issues"
+    "url": "https://github.com/XinZhaoDC/AgentDeck/issues"
   },
-  "homepage": "https://github.com/XinZhaoDC/VSCodeModelSwitch#readme",
+  "homepage": "https://github.com/XinZhaoDC/AgentDeck#readme",
   "keywords": [
     "vscode",
     "claude-code",

@@ -4,13 +4,13 @@
 
 ## 当前基线与入口
 
-- 插件显示名：AgentDeck；仓库/本地源码目标名：AgentDeck。内部身份仍为 `xinzhaodc.vscodemodelswitch`，配置键、命令 ID 和数据键有意保留，不能批量更名。
+- 插件显示名：AgentDeck；仓库及本地源码名称：AgentDeck。内部身份仍为 `xinzhaodc.vscodemodelswitch`，配置键、命令 ID 和数据键有意保留，不能批量更名。
 - 当前运行版本：0.10.0；本轮发布 tag 为 `v0.10.0`，创建/推送结果以 Git 和任务 RESULT 为准。发布检查只新增测试、文档和仓库元数据，不改该版运行逻辑。
 - 容器源码：`/home/workspace/Forest_Interface/code/AgentDeck`。环境入口仍是 `enter-vscodemodelswitch`，Node22 前缀不更名。
 - 唯一总任务：`HO-20261109-001` / `vscodemodelswitch-fusion`，owner 为 Forest_Interface。
 - 总任务正文：`/home/workspace/Forest_Interface/AI_prompt/tasks/task_HO-20261109-001_vscodemodelswitch-fusion.md`，只默认读取到 `ACTIVE_TASK_READ_END`。
 - 权威结果：`/home/workspace/Forest_Interface/.ai/results/HO-20261109-001-result.md`。最新证据：`environment/logs/HO-20261109-001/codex-release-audit-20261112-001/`。
-- 最新实际提交、tag、远程更名是否完成，以 Git 状态和上述结果为准，不按本文件中的目标路径猜测。
+- GitHub 仓库已由用户更名为 `XinZhaoDC/AgentDeck`，地址为 https://github.com/XinZhaoDC/AgentDeck；本地 origin 使用新 SSH 地址。`v0.10.0` 保持原提交，后续仓库元数据修订不移动 tag。最新提交与推送状态以 Git 和任务结果为准。
 
 先完整读取适用 AGENTS.md、owner 数据库导航和活动任务，再读 [客户端架构](client-architecture.md)、[存储管理](management.md)、[独立网络](network-proxy.md)、[开发日志](development-log.md)、[验证记录](validation.md)。不要重新执行历史控制区的旧 next。
 

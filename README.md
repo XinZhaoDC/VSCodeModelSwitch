@@ -62,7 +62,7 @@ AgentDeck is a VS Code extension for maintaining and switching Claude
 Code and Codex API providers. Provider metadata is managed in one sidebar while
 API keys remain in VS Code SecretStorage until a provider is applied.
 
-Repository: [XinZhaoDC/VSCodeModelSwitch](https://github.com/XinZhaoDC/VSCodeModelSwitch)
+Repository: [XinZhaoDC/AgentDeck](https://github.com/XinZhaoDC/AgentDeck)
 
 This private derivative is maintained independently from the original
 VSModelSwitch project. Its MIT license and attribution are preserved in

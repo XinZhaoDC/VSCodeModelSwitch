@@ -41,7 +41,7 @@ AgentDeck（原名 VSCodeModelSwitch）用于管理 Codex 与 Claude Code 的
 官方账号、API 供应商、独立网络和本地历史目录。供应商定义集中显示在侧边栏；
 API 密钥保存在 VS Code 安全存储中，应用供应商时才写入对应客户端配置。
 
-代码仓库：[XinZhaoDC/VSCodeModelSwitch](https://github.com/XinZhaoDC/VSCodeModelSwitch)
+代码仓库：[XinZhaoDC/AgentDeck](https://github.com/XinZhaoDC/AgentDeck)
 
 这是从原 VSModelSwitch 项目派生并独立维护的私有版本。原项目的 MIT
 许可证和署名保留在 [`LICENSE`](LICENSE) 中。
