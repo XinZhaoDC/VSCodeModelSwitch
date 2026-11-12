@@ -1,18 +1,18 @@
 import * as vscode from 'vscode';
+import { EnvironmentState } from './environmentState';
 import { ModelCacheEntry, ProviderProfile, ToolId } from '../types';
 
 const PROVIDERS_KEY = 'vscodemodelswitch.providers';
 const CURRENT_PROVIDER_IDS_KEY = 'vscodemodelswitch.currentProviderIds';
-const LEGACY_CURRENT_PROVIDER_ID_KEY = 'vscodemodelswitch.currentProviderId';
 const MODEL_CACHE_KEY = 'vscodemodelswitch.modelCache';
 const TOOL_ENABLED_KEY = 'vscodemodelswitch.toolEnabled';
 
 export class ProviderStore {
-  constructor(private readonly context: vscode.ExtensionContext) {
+  constructor(private readonly context: vscode.ExtensionContext, private readonly environment = new EnvironmentState(context)) {
     this.context.globalState.setKeysForSync([
       PROVIDERS_KEY,
-      CURRENT_PROVIDER_IDS_KEY,
-      TOOL_ENABLED_KEY
+      'vscodemodelswitch.organization.codex',
+      'vscodemodelswitch.organization.claude'
     ]);
   }
 
@@ -84,15 +84,7 @@ export class ProviderStore {
   }
 
   getCurrentProviderIds(): Partial<Record<ToolId, string>> {
-    const current = this.context.globalState.get<Partial<Record<ToolId, string>>>(CURRENT_PROVIDER_IDS_KEY, {});
-    const legacy = this.context.globalState.get<string>(LEGACY_CURRENT_PROVIDER_ID_KEY);
-    if (legacy && Object.keys(current).length === 0) {
-      const provider = this.getProvider(legacy);
-      if (provider) {
-        return { [provider.tool]: legacy };
-      }
-    }
-    return current && typeof current === 'object' ? current : {};
+    return structuredClone(this.environment.get<Partial<Record<ToolId, string>>>(CURRENT_PROVIDER_IDS_KEY, {}));
   }
 
   getCurrentProviderId(tool: ToolId): string | undefined {
@@ -119,22 +111,22 @@ export class ProviderStore {
     } else {
       delete current[tool];
     }
-    await this.context.globalState.update(CURRENT_PROVIDER_IDS_KEY, current);
+    await this.environment.update(CURRENT_PROVIDER_IDS_KEY, current);
   }
 
   getToolEnabled(tool: ToolId): boolean {
-    const value = this.context.globalState.get<Partial<Record<ToolId, boolean>>>(TOOL_ENABLED_KEY, {});
+    const value = structuredClone(this.environment.get<Partial<Record<ToolId, boolean>>>(TOOL_ENABLED_KEY, {}));
     return value[tool] !== false;
   }
 
   async setToolEnabled(tool: ToolId, enabled: boolean): Promise<void> {
-    const value = this.context.globalState.get<Partial<Record<ToolId, boolean>>>(TOOL_ENABLED_KEY, {});
+    const value = structuredClone(this.environment.get<Partial<Record<ToolId, boolean>>>(TOOL_ENABLED_KEY, {}));
     value[tool] = enabled;
-    await this.context.globalState.update(TOOL_ENABLED_KEY, value);
+    await this.environment.update(TOOL_ENABLED_KEY, value);
   }
 
   getModelCache(): ModelCacheEntry[] {
-    const value = this.context.globalState.get<ModelCacheEntry[]>(MODEL_CACHE_KEY, []);
+    const value = this.environment.get<ModelCacheEntry[]>(MODEL_CACHE_KEY, []);
     return Array.isArray(value) ? value : [];
   }
 
@@ -158,7 +150,7 @@ export class ProviderStore {
       );
     });
     entries.push(entry);
-    await this.context.globalState.update(MODEL_CACHE_KEY, entries.slice(-50));
+    await this.environment.update(MODEL_CACHE_KEY, entries.slice(-50));
   }
 }
 

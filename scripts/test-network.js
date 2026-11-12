@@ -21,7 +21,7 @@ class Memento {
   get(key, fallback) { return this.values.has(key) ? this.values.get(key) : fallback; }
   async update(key, value) { if (this.failOnce) { this.failOnce = false; throw Error('fixture metadata failure'); } if (value === undefined) this.values.delete(key); else this.values.set(key, structuredClone(value)); }
 }
-const values = { http: { proxy: 'http://original.invalid:8000' }, claudeCode: { environmentVariables: [
+const values = { settingsSync: { ignoredSettings: ['editor.fontSize'] }, http: { proxy: 'http://original.invalid:8000' }, claudeCode: { environmentVariables: [
   { name: 'ANTHROPIC_AUTH_TOKEN', value: 'synthetic-credential' }, { name: 'HTTP_PROXY', value: 'http://previous.invalid:9000' }
 ] } };
 let failedUpdate, override;
@@ -43,7 +43,7 @@ const { NetworkProxyManager } = require('../out/network/manager');
 const { ProxyServer } = require('../out/proxy/server');
 function context() {
   const secrets = new Map();
-  return { globalState: new Memento(), secrets: { get: async key => secrets.get(key), store: async (key, value) => { secrets.set(key, value); }, delete: async key => { secrets.delete(key); } }, secretValues: secrets };
+  return { globalStorageUri: { fsPath: path.join(os.tmpdir(), 'network-environment-fixture') }, globalState: new Memento(), secrets: { get: async key => secrets.get(key), store: async (key, value) => { secrets.set(key, value); }, delete: async key => { secrets.delete(key); } }, secretValues: secrets };
 }
 
 async function main() {
@@ -65,77 +65,7 @@ async function main() {
       assert.equal(config.inspect('proxy').globalValue, transport.DEFAULT_PROXY.url);
     } finally { await config.update('proxy', before); }
   });
-  const initial = structuredClone(values), ctx = context();
-  let manager = new NetworkProxyManager(ctx);
-  await test('Apply preserves auth fields, sets both clients, and stores only owned fields securely', async () => {
-    await manager.apply(transport.DEFAULT_PROXY);
-    assert.equal(values.http.proxy, transport.DEFAULT_PROXY.url);
-    assert.ok(values.claudeCode.environmentVariables.some(e => e.value === 'synthetic-credential'));
-    assert.equal(manager.environment('codex').HTTPS_PROXY, transport.DEFAULT_PROXY.url);
-    assert.equal(process.env.NO_PROXY, transport.DEFAULT_PROXY.noProxy);
-    assert.ok(!JSON.stringify([...ctx.globalState.values.values()]).includes('synthetic-credential'));
-    assert.ok(![...ctx.secretValues.values()].some(v => v.includes('synthetic-credential')));
-  });
-  await test('Reapply and target changes preserve the first original settings', async () => {
-    await manager.apply({ ...transport.DEFAULT_PROXY, url: 'http://127.0.0.1:12001' });
-    await manager.apply({ ...transport.DEFAULT_PROXY, codex: false });
-    assert.equal(values.http.proxy, initial.http.proxy);
-    assert.deepEqual(manager.environment('codex'), {});
-    await manager.apply(transport.DEFAULT_PROXY);
-  });
-  await test('Reload reuses saved network configuration without rewriting client settings', () => {
-    manager.dispose(); manager = new NetworkProxyManager(ctx);
-    assert.equal(manager.environment('claude').HTTP_PROXY, transport.DEFAULT_PROXY.url);
-    assert.equal(values.http.proxy, transport.DEFAULT_PROXY.url);
-  });
-  await test('Restore preserves unrelated variables added after Apply', async () => {
-    values.claudeCode.environmentVariables.push({ name: 'NEW_VARIABLE', value: 'keep' });
-    await manager.restore();
-    assert.equal(values.http.proxy, initial.http.proxy);
-    for (const entry of [...initial.claudeCode.environmentVariables, { name: 'NEW_VARIABLE', value: 'keep' }]) {
-      assert.ok(values.claudeCode.environmentVariables.some(e => e.name === entry.name && e.value === entry.value));
-    }
-    assert.deepEqual(manager.environment('claude'), {});
-  });
-  await test('Partial Apply failure rolls back editor settings and saved state', async () => {
-    const before = structuredClone(values);
-    failedUpdate = 'claudeCode.environmentVariables';
-    await assert.rejects(manager.apply(transport.DEFAULT_PROXY));
-    assert.deepEqual(values, before);
-    assert.equal(manager.state().config, undefined);
-  });
-  await test('Workspace override is detected and global settings are rolled back', async () => {
-    const before = structuredClone(values);
-    override = { section: 'http', key: 'proxy', value: 'http://workspace.invalid:8000' };
-    try { await assert.rejects(manager.apply(transport.DEFAULT_PROXY), /overrides HTTP proxy/); }
-    finally { override = undefined; }
-    assert.deepEqual(values, before);
-  });
-  await test('Claude workspace override rolls back both clients and saved state', async () => {
-    const before = structuredClone(values);
-    override = { section: 'claudeCode', key: 'environmentVariables', value: [{ name: 'HTTP_PROXY', value: 'http://workspace.invalid:8000' }] };
-    try { await assert.rejects(manager.apply(transport.DEFAULT_PROXY), /overrides Claude environment variables/); }
-    finally { override = undefined; }
-    assert.deepEqual(values, before);
-    assert.equal(manager.state().config, undefined);
-    assert.equal(ctx.secretValues.size, 0);
-  });
-  await test('Metadata failure rolls back settings without losing original state', async () => {
-    const before = structuredClone(values); ctx.globalState.failOnce = true;
-    await assert.rejects(manager.apply(transport.DEFAULT_PROXY));
-    assert.deepEqual(values, before);
-  });
-  await test('Restore rejects externally modified proxy before changing either client', async () => {
-    await manager.apply(transport.DEFAULT_PROXY);
-    values.http.proxy = 'http://external.invalid:3333';
-    const before = structuredClone(values);
-    await assert.rejects(manager.restore(), /changed outside/);
-    assert.deepEqual(values, before);
-    values.http.proxy = transport.DEFAULT_PROXY.url;
-    await manager.restore();
-  });
-  manager.dispose();
-
+  // Manager ownership, native CLI files and rollback are tested in test-isolated-network.js.
   const connections = [], sockets = new Set();
   const fixture = http.createServer(async (req, res) => {
     if (req.url === '/redirect-local') { res.writeHead(302, { location: 'http://127.0.0.1:' + fixture.address().port + '/after-redirect' }); res.end(); return; }
@@ -173,6 +103,32 @@ async function main() {
   console.log('RETAINED_FIXTURE: ' + directory);
   try {
     transport.setNetworkProxy(config);
+    await test('concurrent Codex and Claude requests use different CONNECT proxies', async () => {
+      const second = http.createServer(); let firstCount = 0, secondCount = 0;
+      const countFirst = () => firstCount++;
+      proxy.on('connect', countFirst);
+      second.on('connect', proxy.listeners('connect')[0]); second.on('connect', () => secondCount++);
+      const secondPort = await listen(second);
+      try {
+        transport.setNetworkProxy(config, 'codex');
+        transport.setNetworkProxy({ ...config, url: 'http://127.0.0.1:' + secondPort }, 'claude');
+        await Promise.all(['codex', 'claude'].map(tool => transport.withNetworkTool(tool, async () => {
+          await new Promise(resolve => setTimeout(resolve, tool === 'codex' ? 5 : 1));
+          const response = await transport.networkFetch(remote + '/tool-' + tool); assert.equal(response.status, 200); await response.text();
+        })));
+        assert.ok(firstCount > 0); assert.ok(secondCount > 0);
+        const before = [firstCount, secondCount];
+        transport.setNetworkProxy(undefined, 'claude');
+        const direct = await transport.withNetworkTool('claude', () => transport.networkFetch('http://127.0.0.1:' + port + '/direct'));
+        await direct.text(); assert.deepEqual([firstCount, secondCount], before);
+      } finally {
+        proxy.removeListener('connect', countFirst);
+        transport.disposeNetworkTransport();
+        for (const socket of sockets) socket.destroy();
+        await new Promise(resolve => second.close(resolve));
+        transport.setNetworkProxy(config);
+      }
+    });
     await test('CONNECT proxy resolves a remote hostname with no local DNS', async () => {
       const response = await transport.networkFetch(remote + '/ok');
       assert.equal(response.status, 200); assert.equal((await response.json()).host, 'upstream.invalid:' + port);

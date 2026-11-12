@@ -1,3 +1,5 @@
+import { withNetworkTool } from '../network/transport';
+import { ToolId } from '../types';
 import { networkFetch } from '../network/transport';
 import { UsageQueryConfig, UsageQueryResult } from '../types';
 
@@ -40,6 +42,16 @@ export function usagePreset(
 }
 
 export async function queryUsage(
+  config: UsageQueryConfig,
+  baseUrl: string,
+  apiKey: string,
+  usageAccessToken?: string,
+  signal?: AbortSignal,
+  tool: ToolId = 'claude'): Promise<UsageQueryResult> {
+  return withNetworkTool(tool, () => queryUsageScoped(config, baseUrl, apiKey, usageAccessToken, signal));
+}
+
+async function queryUsageScoped(
   config: UsageQueryConfig,
   baseUrl: string,
   apiKey: string,

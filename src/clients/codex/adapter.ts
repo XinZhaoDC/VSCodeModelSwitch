@@ -1,10 +1,15 @@
 import * as fs from 'fs/promises';
-import { atomicWrite, backupFile, pathExists } from '../config/atomicWrite';
-import { getTopLevelStringValue, setSectionValue } from '../config/tomlEdit';
-import { CodexMode, ResolvedProvider } from '../types';
-import { resolveHomePath } from '../utils/paths';
+import { pathExists } from '../../config/atomicWrite';
+import { FileRecovery } from '../../config/recovery';
+import { validateConfigText } from '../../config/templates';
+import { getTopLevelStringValue, setSectionValue, setTopLevelValue } from '../../config/tomlEdit';
+import { CodexMode, ResolvedProvider } from '../../types';
+import { getToolHome } from '../../utils/paths';
+import { join } from 'path';
 
 export class CodexAdapter {
+  constructor(private readonly recoveryDirectory = () => join(getToolHome('codex'), '.recovery', 'current')) {}
+  async recoverPending(): Promise<string | undefined> { return FileRecovery.recover(this.recoveryDirectory()); }
   async apply(resolved: ResolvedProvider): Promise<void> {
     if (!resolved.codex) {
       return;
@@ -14,33 +19,33 @@ export class CodexAdapter {
       await this.applyOfficialMode();
       return;
     }
+    if ((await this.readActiveConfig()).officialLoggedIn) throw new Error('Switch to the managed API identity before applying API settings. The current official login was kept.');
     const configPath = this.getConfigPath();
     const authPath = this.getAuthPath();
-    const content = setSectionValue(resolved.codex.configText, 'model_providers.OpenAI', 'experimental_bearer_token', resolved.codex.key);
+    let content = setTopLevelValue(setSectionValue(resolved.codex.configText, 'model_providers.OpenAI', 'experimental_bearer_token', resolved.codex.key), 'cli_auth_credentials_store', 'file');
+    const previous = await fs.readFile(configPath, 'utf8').catch(() => '');
+    const sqlite = getTopLevelStringValue(previous, 'sqlite_home');
+    if (sqlite) content = setTopLevelValue(content, 'sqlite_home', sqlite);
+    validateConfigText('codex', content);
 
-    await backupFile(configPath);
-    await backupFile(authPath);
-    // API mode starts from a clean Codex auth state. The API config is written
-    // after both files have been cleared so an old official login cannot leak
-    // into API mode.
-    await atomicWrite(configPath, '');
-    await atomicWrite(authPath, '');
-    await atomicWrite(configPath, content);
+    await FileRecovery.run(this.recoveryDirectory(), async tx => {
+      await tx.write(configPath, content);
+      await tx.write(authPath, '');
+    });
   }
 
   getConfigPath(): string {
-    return resolveHomePath('.codex', 'config.toml');
+    return join(getToolHome('codex'), 'config.toml');
   }
 
-  getAuthPath(): string { return resolveHomePath('.codex', 'auth.json'); }
+  getAuthPath(): string { return join(getToolHome('codex'), 'auth.json'); }
 
   async applyOfficialMode(): Promise<void> {
     const configPath = this.getConfigPath();
-    const authPath = this.getAuthPath();
-    await backupFile(configPath);
-    await backupFile(authPath);
-    await atomicWrite(configPath, '');
-    await atomicWrite(authPath, '');
+    let config = await fs.readFile(configPath, 'utf8').catch(() => '');
+    const selected = getTopLevelStringValue(config, 'model_provider');
+    if (selected && selected !== 'openai') config = setTopLevelValue(config, 'model_provider', 'openai');
+    await FileRecovery.run(this.recoveryDirectory(), tx => tx.write(configPath, setTopLevelValue(config, 'cli_auth_credentials_store', 'file')));
   }
 
   async readMode(): Promise<CodexMode | 'unknown'> {

@@ -8,3 +8,27 @@ out/
 **/.claude/settings.json
 **/.codex/config.toml
 *.log
+
+# Private runtime identity/history data must never ship with source or VSIX.
+**/auth.json
+**/identities.json
+**/home-*/**
+**/codex-history-*/**
+**/state_*.sqlite*
+**/history.jsonl
+**/session_index.jsonl
+**/sessions/**/*.jsonl
+**/archived_sessions/**
+.vscodemodelswitch-home/**
+scripts/proxy-test-sandbox/**
+
+# Account data and operation recovery are runtime-private.
+**/ai_client_data/**
+**/history_chat/**
+**/.recovery/**
+**/.registry-recovery/**
+**/profiles.json
+**/binding.json
+**/.modelswitch-environment.json
+**/*.before
+**/thread_history_*.sqlite*

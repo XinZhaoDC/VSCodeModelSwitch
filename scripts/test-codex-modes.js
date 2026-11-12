@@ -8,7 +8,7 @@ let sandbox;
 const vscode = { workspace: { getConfiguration: () => ({ get: (key, fallback) => key === 'configTarget' ? 'sandbox' : key === 'testHome' ? sandbox : fallback }), workspaceFolders: [] }, Uri: { file: fsPath => ({ fsPath }) } };
 const originalLoad = Module._load;
 Module._load = function (name, ...args) { return name === 'vscode' ? vscode : originalLoad.call(this, name, ...args); };
-const { CodexAdapter } = require('../out/adapters/codexAdapter');
+const { CodexAdapter } = require('../out/clients/codex/adapter');
 const API_CONFIG = `model_provider = "OpenAI"\nmodel = "gpt-test"\n\n[model_providers.OpenAI]\nname = "OpenAI"\nbase_url = "https://api.example.test"\nwire_api = "responses"\nexperimental_bearer_token = "synthetic-api-key"\n`;
 (async () => {
   sandbox = await fs.mkdtemp(path.join(os.tmpdir(), 'vscodemodelswitch-codex-mode-test-'));
@@ -16,12 +16,15 @@ const API_CONFIG = `model_provider = "OpenAI"\nmodel = "gpt-test"\n\n[model_prov
   const configPath = path.join(sandbox, '.codex/config.toml'), authPath = path.join(sandbox, '.codex/auth.json');
   await fs.writeFile(configPath, API_CONFIG); await fs.writeFile(authPath, '{"tokens":"official-login"}');
   const adapter = new CodexAdapter(); assert.equal(await adapter.readMode(), 'api');
-  await adapter.applyOfficialMode(); assert.equal(await fs.readFile(configPath, 'utf8'), ''); assert.equal(await fs.readFile(authPath, 'utf8'), ''); assert.equal(await adapter.readMode(), 'official');
+  await adapter.applyOfficialMode(); assert.match(await fs.readFile(configPath, 'utf8'), /cli_auth_credentials_store = "file"/); assert.equal(await fs.readFile(authPath, 'utf8'), '{"tokens":"official-login"}'); assert.equal(await adapter.readMode(), 'official');
   assert.equal((await adapter.readActiveConfig()).officialLoggedIn, false);
   await fs.writeFile(configPath, 'model = "gpt-official"\nmodel_reasoning_effort = "high"\n');
   await fs.writeFile(authPath, JSON.stringify({ OPENAI_API_KEY: null, tokens: { access_token: 'synthetic-official-access', id_token: 'synthetic-official-id' } }));
   let active = await adapter.readActiveConfig();
   assert.equal(active.mode, 'official'); assert.equal(active.officialLoggedIn, true); assert.equal(active.model, 'gpt-official');
+  await assert.rejects(adapter.apply({ codex: { mode: 'api', configText: API_CONFIG, key: 'synthetic-api-key' } }), /managed API identity/);
+  assert.match(await fs.readFile(authPath, 'utf8'), /synthetic-official-access/);
+  await adapter.applyOfficialMode(); assert.equal((await adapter.readActiveConfig()).officialLoggedIn, true);
   await fs.writeFile(configPath, 'model_provider = "openai"\nmodel = "gpt-official"\n');
   assert.equal(await adapter.readMode(), 'official');
   await fs.writeFile(authPath, '{}');
@@ -33,6 +36,19 @@ const API_CONFIG = `model_provider = "OpenAI"\nmodel = "gpt-test"\n\n[model_prov
   await fs.writeFile(configPath, API_CONFIG);
   await adapter.apply({ codex: { providerId: 'api', providerName: 'API', baseUrl: 'https://api.example.test', key: 'synthetic-api-key', model: 'gpt-test', codexProviderId: 'OpenAI', wireApi: 'responses', configText: API_CONFIG, mode: 'api' } });
   assert.equal(await fs.readFile(authPath, 'utf8'), ''); assert.match(await fs.readFile(configPath, 'utf8'), /experimental_bearer_token = "synthetic-api-key"/); assert.equal(await adapter.readMode(), 'api');
+  const { FileRecovery } = require('../out/config/recovery');
+  const before = await fs.readFile(configPath, 'utf8');
+  const write = FileRecovery.prototype.write;
+  FileRecovery.prototype.write = async function(file, content) {
+    if (file === authPath) throw new Error('Synthetic auth write failure');
+    return write.call(this, file, content);
+  };
+  try { await assert.rejects(adapter.apply({ codex: { mode: 'api', configText: API_CONFIG, key: 'synthetic-next' } }), /已恢复/); }
+  finally { FileRecovery.prototype.write = write; }
+  assert.equal(await fs.readFile(configPath, 'utf8'), before);
+  await fs.writeFile(configPath, before + '');
+  await assert.rejects(adapter.apply({ codex: { mode: 'api', configText: 'model_provider = "OpenAI"', key: 'synthetic' } }), /base_url/);
+  assert.equal(await fs.readFile(configPath, 'utf8'), before);
   console.log('RESULT: Codex mode/auth assertions passed, 0 failed');
   console.log('RETAINED_SANDBOX: ' + sandbox);
 })().catch(error => { console.error(error.stack); process.exitCode = 1; });

@@ -1,3 +1,4 @@
+import { withNetworkTool } from '../network/transport';
 import { networkFetch } from '../network/transport';
 import { CompatibilityResult, ProxyConfig, ToolId } from '../types';
 import { buildAuthHeaderCandidates, buildCompatibilityUrl } from './modelFetcher';
@@ -5,6 +6,17 @@ import { resolveProxyOptions } from '../proxy/config';
 import { decodeResponsesBody } from '../proxy/responses';
 
 export async function verifyModel(
+  tool: ToolId,
+  baseUrl: string,
+  apiKey: string,
+  model: string,
+  signal?: AbortSignal,
+  proxy?: ProxyConfig
+): Promise<CompatibilityResult> {
+  return withNetworkTool(tool, () => verifyModelScoped(tool, baseUrl, apiKey, model, signal, proxy));
+}
+
+async function verifyModelScoped(
   tool: ToolId,
   baseUrl: string,
   apiKey: string,

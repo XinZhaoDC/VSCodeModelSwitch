@@ -1,4 +1,23 @@
-# VSCodeModelSwitch
+# AgentDeck
+
+本次发布的 Codex 专项验收、宿主机测试步骤与换账号接手开发，请阅读[宿主机验收](docs/host-acceptance.md)及[开发交接入口](docs/development-handoff.md)。仓库目录改为 `AgentDeck`；内部扩展身份和已有用户数据保持不变。
+
+**0.10.0** adds Codex provider groups, empty groups, drag ordering, environment-local availability, reusable request templates and v2 configuration exports/imports. Registered client controllers and views provide an extension point for additional agents. Existing providers and shared API history are preserved. See [client architecture and groups](docs/client-architecture.md).
+
+**0.9.4** places network actions directly below the proxy badge and clarifies the overview legacy-route label as pending reapplication. Configuration status is distinct from connectivity testing; installation, refresh and transport testing do not migrate client settings.
+
+**0.9.3** fixes Chinese native confirmations even with an English VS Code locale, adds explicit Chinese cancellation actions, and localizes folder selection, speed progress and user-facing error explanations while preserving raw diagnostic logs. Controls owned by VS Code itself still follow the editor locale.
+
+**0.9.2** uses the confirmed name **AgentDeck** throughout extension titles, commands and UI. Internal extension identity, existing settings and stored data remain unchanged; the interface remains Chinese-first.
+
+**0.9.1** adopts the display name AI 客户端管家 (AI Client Hub), defaults to a Chinese UI, moves network test/apply/restore controls before the draft fields, and removes the duplicate API configuration path. Extension identity, storage keys and existing data are preserved. Network clipboard data contains the proxy entry, bypass list, note and tool flags; pasting fills the current tool draft without applying it.
+
+**0.9.0** reorganizes Codex overview, storage, networking and account/API management. It adds scoped timed feedback, reload severity, in-editor log browsing, selectable history backup deletion, and consistent Codex-only provider exports/imports. Claude networking covers the extension and normal CLI using the same configuration directory without mutating the extension host environment. Codex uses an **experimental Linux dispatcher**; mixed Windows/WSL clients are not supported yet. Read [networking](docs/network-proxy.md) before enabling and [development status](docs/development-log.md) for platform gaps.
+
+Earlier releases:
+
+
+**0.8.1** unifies the Codex page, puts storage below overview, keeps operation results beside their controls, and adds bounded environment-local operation logs with verified relocation. Impactful changes use one explicit confirmation instead of private task-status detection. [Management guide](docs/management.md).
 
 0.6.0 adds **通过 VPN 联网 / Network proxy**: shared HTTP proxy settings for
 Claude Code, Codex and the extension's outgoing API/model/speed requests.
@@ -18,15 +37,12 @@ justdowork preset and per-provider advanced overrides. Configure it in Add
 Provider or an existing provider's Config editor; Save retains upstream
 configuration, and Apply generates the local client endpoint. No Python is
 required. Local running state and upstream model failures are shown separately.
-HTTPS upstream requests use the extension host's global `fetch`, following the
-same host-proxy route as Network checks; buffered HTTP requests use Node HTTP.
+Plugin requests carry the tool identity and use its own proxy or direct transport. Codex native launch still uses the editor HTTP proxy, which can affect other extensions; Claude launch variables are separate.
 The overview shows **Tool / Mode / Provider Name / Model ID / Status**. Official
 Codex login is shown independently of saved API providers, with **Signed in** or
 **Login required**, and **Client default** when the client chooses its model.
 The Codex section displays its current mode and two buttons: **Use Official
-Account** and **Apply API Provider**. Switching clears `config.toml` and
-`auth.json`; Official mode then requires a new login, while API mode writes the
-selected API provider. The official button is disabled while official mode is
+Account** and **Apply API Provider**. Official mode keeps cached authentication. Before replacing a signed-in official configuration with API settings, select a managed API identity; API mode then writes the selected provider. The official button is disabled while official mode is
 already active, preserving the existing login. Codex
 API provider configuration follows the same editor flow as Claude Code.
 Both Config editors expose connection mode, presets, authentication, headers,
@@ -42,7 +58,7 @@ validation are recorded in the [changelog](AI_Prompt/03-功能更新记录.md) a
 
 English | [简体中文](README.zh-CN.md)
 
-VSCodeModelSwitch is a VS Code extension for maintaining and switching Claude
+AgentDeck is a VS Code extension for maintaining and switching Claude
 Code and Codex API providers. Provider metadata is managed in one sidebar while
 API keys remain in VS Code SecretStorage until a provider is applied.
 
@@ -115,11 +131,11 @@ Real mode targets the effective user home:
 ~/.codex/config.toml
 ```
 
-Before each replacement, the previous file is copied to:
+Claude retains its previous-file backup. Codex keeps only a temporary operation recovery point and optional manual history backups:
 
 ```text
 ~/.claude/vscodemodelswitchbak/
-~/.codex/vscodemodelswitchbak/
+Codex: temporary .recovery/ for the current operation; manual history snapshots in ai_client_data/codex/backups/
 ```
 
 The same relative layout is used under the sandbox home.
@@ -128,7 +144,7 @@ The same relative layout is used under the sandbox home.
 
 ### 1. Enable A Tool
 
-Open the VSCodeModelSwitch Activity Bar view. Each Claude/Codex section has an
+Open the AgentDeck Activity Bar view. Each Claude/Codex section has an
 `Enabled` operation lock and a collapse control. Disabling a tool prevents
 changes while `Applied Config` remains available for inspection.
 
@@ -200,8 +216,7 @@ Open `View -> Output` and select `VSCodeModelSwitch` for sanitized request
 diagnostics. Logs never include API keys or raw response bodies. The global
 status area shows the current extension log-folder size and backup sizes.
 
-`Delete Log` removes only this extension's current log files. Each tool has its
-own `Delete Backups` action. Both require confirmation.
+`Delete Log` removes only this extension's current log files. Claude retains its `Delete Backups` action. Codex uses the storage panel for manual history backups and clears successful operation recovery data; existing old `.bak` files are retained. Deletion requires confirmation.
 
 `Export` writes full provider templates and metadata but clears API keys and
 management tokens. `Import` rejects duplicate provider names within the same
@@ -263,3 +278,7 @@ The complete regression checklist is in [`docs/validation.md`](docs/validation.m
 ## License
 
 MIT
+
+## Codex 0.8.1
+
+Codex now separates official accounts, API Providers and data storage. Account history is shared through a selected `ai_client_data/codex` folder; configuration and login caches remain private to each environment and account. Native Codex Chats displays the history. A global refresh reads shared data without applying another environment’s settings. Impactful changes require one explicit confirmation and retain operation recovery; installation and real-account acceptance remain manual. See [management guide](docs/management.md) for migration, Windows limits and recovery. Claude Code UI remains unchanged.

@@ -1,132 +1,55 @@
-# Chat network proxy
+# 独立聊天网络设置（0.9.0）
 
-The sidebar's **通过 VPN 联网 / Network proxy** panel routes Claude Code,
-Codex and VSCodeModelSwitch's outgoing HTTP(S) requests through an existing
-HTTP proxy. For the current host-network Docker setup, the tested address is
-`http://127.0.0.1:12000`. This feature is off until **Enable / Apply** is clicked.
-It does not start a VPN, change Docker networking, or proxy arbitrary container
-applications.
+ModelSwitch 为 Codex 和 Claude Code 分别保存当前环境的 HTTP 代理入口和绕过列表。不启动 VPN、不选择远端节点、不更改系统路由或防火墙，也不修改 VS Code 扩展宿主的 `process.env`。本版本不再为 Codex 设置共享的 `http.proxy`。
 
-## Apply and verify
+## Claude Code：插件与正常 CLI 共用
 
-1. Keep the host VPN in its currently working mode while installing the VSIX.
-2. Open the panel. Enter the HTTP proxy URL and select the client launch settings
-   to manage (Claude Code, Codex, or both). URLs containing credentials are not
-   supported by this feature. Loopback bypass is always retained.
-3. **Test connection** makes unauthenticated HTTPS requests to the selected
-   clients' service origins through the entered proxy, without changing settings.
-   Any HTTP status, including 401/403, proves transport reachability only. It does
-   not verify account access, model streaming, WebSocket behavior or chat.
-4. **Enable / Apply** merges the proxy fields into client launch settings. Keep
-   TUN on, restart the existing clients or reload the VS Code window, and verify
-   a real conversation before changing the host VPN mode.
-5. With the host VPN in system-proxy mode and TUN off, verify a new real
-   conversation in each selected client. Restore the known-working host mode
-   first if connectivity is lost. This final acceptance is separate from local
-   automated tests.
+应用设置会合并当前环境 `CLAUDE_CONFIG_DIR/settings.json`（未指定时为 `~/.claude/settings.json`）中的代理变量，并为 `claudeCode.environmentVariables` 设置相同值。八个受管字段为 HTTP_PROXY、HTTPS_PROXY、NO_PROXY、ALL_PROXY 及其小写形式；ALL_PROXY 清空以免其他代理入口产生歧义。其他环境变量、认证配置和设置字段保留。供应商 Apply 不会擦掉这些网络字段。
 
-An HTTP URL is also correct for HTTPS requests: the client uses CONNECT to carry
-the TLS connection through the HTTP proxy. Claude Code does not support SOCKS
-proxy configuration, so the shared UI uses the tested HTTP entry.
+正常启动、使用同一配置目录的 CLI 会读取这些值；ModelSwitch 终端按钮也为该工具的新终端显式传入相同代理。两个终端按钮都不再隐式 Apply 供应商。不会向所有 VS Code 终端统一注入 API 环境变量。
 
-## Apply error in v0.6.0
+显式使用另一用户/配置目录、更高优先级覆盖，以及不遵守 HTTP 代理变量的外部工具不能仅凭此配置视为受控。外部浏览器登录网页仍使用浏览器或系统网络设置。VPN 是否换节点或选择 DIRECT 由 VPN 软件管理；ModelSwitch 不实现代理失败后自动直连。
 
-Version 0.6.0 can falsely report “A workspace or policy overrides HTTP proxy”
-after writing settings, because it checks an old VS Code configuration snapshot.
-The failed Apply rolls settings back and leaves the panel Off. Install 0.6.1 or
-later and reload the window to load the fix, then Apply again while TUN is still
-on. A successful Apply requires another client restart/window reload before
-checking chat. Version 0.6.1 reads fresh configuration snapshots for both clients;
-actual workspace/policy conflicts still reject Apply and roll back.
+## Codex：Linux 实验性独立入口
 
-## State and actions (v0.6.2)
+当前官方扩展通过 `http.proxy` 注入后台代理，却没有与 Claude 对等的专属代理环境变量设置。`chatgpt.cliExecutable` 又是 application 作用域，不能让宿主和容器各写一个不同绝对路径。
 
-The panel starts with a text badge: **已启用 / Enabled** (green) or
-**已停用 / Disabled**. The badge reflects confirmed configuration, not whether
-a connection test or chat has succeeded.
+本版使用统一命令名 `vscodemodelswitch-codex` 注册该入口，在每个 Linux 环境的官方 Codex 二进制目录新增一个生成的启动脚本。已核对的官方扩展会把自己的二进制目录追加到后台进程 PATH，因此同一个命令名在不同环境解析到各环境脚本。脚本只给自己的原版 Codex 子进程提供代理变量，保留参数、工作目录、CODEX_HOME、标准输入输出和退出状态。官方二进制及扩展 bundle 不被替换。
 
-- Off: **启用代理 / Enable** is available; **已停用 / Disabled** cannot be clicked.
-- On with unchanged settings: **✓ 已启用 / Enabled** has a green check and is
-  disabled; **停用并恢复 / Disable** is available.
-- On with edited settings: the active badge remains Enabled, the description
-  says changes are not applied, and **应用更改 / Apply changes** is available.
-  Reverting the edits disables redundant Apply again. Trailing URL slashes and
-  bypass ordering/duplicates do not count as changes.
-- Submitting Enable, Apply, Disable or Test locks the proxy controls immediately
-  and shows progress. The existing badge remains until the host confirms the
-  result. Failures keep the draft and unlock retry without claiming success.
+这是共享的启动注册，不是共享的代理地址。每个环境的路由值仍各自保存。新 Linux 环境发现该注册时，会准备自己的脚本；未在该环境启用代理时准备不覆盖环境变量的直通脚本。检测到同名 PATH 冲突、用户自定义启动程序或非受管文件时拒绝覆盖。脚本需要当前用户对官方扩展二进制目录有写权限。首次注册会明确提示兼容性范围；入口被加入 Settings Sync 排除。
 
-This update does not change proxy routing, settings storage or API compatibility
-behavior. Install the new VSIX and reload the window to load the UI; an existing
-Enabled configuration does not need another Apply.
+**重要限制：同一 VS Code 客户端使用该公共注册的其他环境，也需要安装并启动 ModelSwitch。Windows 原生可执行入口未实现；Windows 窗口直接启动 WSL 后台、以及直接连接 WSL 窗口尚未原生验收。混合 Windows/Linux 客户端不要启用此实验入口。首次进入新环境或官方扩展升级后可能需要重新加载；版本兼容与升级仍需原生验收。**
 
-## What changes
+停用 Codex 时把本环境脚本恢复为不注入代理的直通入口；保留公共命令注册以免影响其他仍使用它的 Linux 环境。恢复的是代理行为，不表示删除公共启动注册。所有环境均停用、准备卸载 ModelSwitch 时，应在 VS Code 设置中清除 `chatgpt.cliExecutable`，恢复官方默认入口。
 
-- Codex IDE: VS Code's global `http.proxy`, read by the installed Codex launcher
-  and forwarded as `HTTP_PROXY`/`HTTPS_PROXY` to its new child process. Other
-  extensions honoring this editor setting may also be affected.
-- Claude Code IDE: only the six proxy variables in
-  `claudeCode.environmentVariables`; other entries remain intact.
-- Terminals opened by VSModelSwitch: explicit proxy environment for the selected
-  tool. Existing terminals and independent CLI launches are not rewritten.
-- The extension host's `NO_PROXY`/`no_proxy` environment is set while enabled so
-  new Codex child processes inherit local bypass. The installed Codex launcher
-  does not forward VS Code's separate bypass settings. Prior environment values
-  are restored when the feature is disabled or this extension is disposed.
-- Plugin model lists, network/usage queries, verification, speed tests, relay
-  calls and proxy web tools use the same network setting. The official Codex
-  speed-test child receives the proxy environment explicitly.
+## 启用、复制与预设
 
-Applying a Provider, switching Codex official/API mode or starting/stopping an
-API compatibility route does not reset the network proxy. API URLs, keys,
-protocol translation, thinking settings and tool mappings retain their original
-meaning. Local `/providers/...` calls bypass the network proxy; the relay's
-outgoing upstream call uses it.
+1. 选择对应工具页面，填写 HTTP 代理入口、绕过目标与备注。预设端口仅为示例，不保证与 VPN 软件一致。
+2. 复制/粘贴和选择预设只更改草稿。自定义预设按工具和环境保存，不自动应用。
+3. 测试连接只检查传输，任何 HTTP 响应都不代表账号、额度或聊天成功。
+4. 应用或停用前，先结束当前客户端中的运行任务并确认。成功后按提示重新加载，等待状态由下一次启动的本地核查清除。
+5. 最后在原生插件和 CLI 验证实际聊天；这些验收不能由 ModelSwitch 的探测替代。
 
-The saved network configuration is local to the extension's editor environment,
-not part of portable Provider exports. Original managed settings are retained in
-SecretStorage, including any original authenticated proxy URL; account files and
-unrelated environment variables are not copied. Only explicit Apply/Restore
-writes editor settings; activation restores the saved transport selection
-without rewriting client settings.
+`localhost,127.0.0.1,::1` 是三种本地目标写法。绕过列表检查最终目标，不检查代理服务器本身。例如访问 `https://api.example.com` 时可交给本地 `http://127.0.0.1:12000` 代理；访问本地兼容转发接口时不经过代理。Linux host 网络容器与宿主共享网络空间，可访问相同回环入口；隔离网络容器通常需要宿主可达地址。
 
-## Restore and limits
+## 旧版迁移与失败恢复
 
-**Disable / Restore** restores the original managed fields, preserves unrelated
-Claude environment entries added later, and removes this feature's launch
-environment. Restart existing clients afterward. Restore reports a conflict
-instead of overwriting proxy settings changed outside VSModelSwitch. Use Restore
-before uninstalling or downgrading this extension.
+旧版配置不会因安装就自动迁移。状态明确提示重新应用或停用。只有对应工具的显式操作，才会恢复本环境旧版所接管的 VS Code HTTP 字段；外部改动冲突时保留现场。Claude 操作不恢复 Codex 字段，反之亦然。
 
-Localhost, `.localhost`, IPv4 loopback and `::1` always bypass the explicit
-transport. Additional bypass entries accept exact hosts, `host:port`, domain
-suffixes such as `.example.org`, and `*`; CIDR ranges are not supported here.
-Redirects re-evaluate bypass and remove authentication on an origin change.
-TLS validation stays enabled in the explicit transport. A failed proxy request
-does not silently fall back to a direct connection.
+文件修改使用短期 FileRecovery 记录，原设置的受管字段与未完成的设置恢复记录保存在环境专属 SecretStorage。成功后清理临时材料；失败按原值恢复，恢复未完成时保留记录和持续错误状态。启动/手动刷新检查恢复记录；不会把未知或冲突状态伪装成成功。不要手动删除未解决的恢复材料。
 
-Changing network settings clears in-memory connection diagnostics and changes
-the speed result identity, so previous-route measurements are not labelled as
-the current route. Network settings cannot change during an active speed batch.
+## 验证边界
 
-The transport uses pinned runtime dependency `undici` 7.25.0 (MIT), already
-available in the development dependency tree and now included in the VSIX.
-Its runtime requires Node >=20.18.1. This implementation was built/tested with
-the existing Node 22 development environment; actual installed-client visual
-and host-system-proxy acceptance remain separate checks.
+Linux 合成配置验证覆盖独立应用/停用、共享启动注册、多环境状态、CLI 配置、参数传递、原环境变量不变、外部修改与失败恢复。原生 Codex 和 Claude CLI 的实验使用隔离空目录、合成凭据及本地错误响应，仅证明请求连接到指定入口，不证明真实账号聊天成功。Windows/WSL 与实际图形界面、真实登录验收另行进行。每次更新的缺口见源码仓库 [开发日志](development-log.md)。
 
-## Local validation
+## 0.9.1 界面调整
 
-```bash
-npm run check
-npm run test:network
-npm run test:proxy
-npm run test:codex-proxy
-npm run test:codex-modes
-npm run test:speed
-```
+网络模块优先显示“测试连接”“启用代理/应用更改”“停用并恢复”三个操作，随后显示状态和填写项。复制设置会把当前草稿的 HTTP 代理入口、绕过列表、备注及工具标记写入剪贴板；粘贴会改为当前页面的工具标记，并只填入草稿，仍须手动应用。固定回环绕过项会规范化保留。不会复制账号、API 密钥、历史或代理启停状态，也不会批量复制所有自定义预设。
 
-Tests use synthetic settings, generated fixture certificates and loopback
-CONNECT/HTTP(S) servers, without real credentials or model calls. They establish
-transport/configuration behavior and regression coverage, not real account or
-VPN stability.
+本轮只调整文案与控件位置，不改变 0.9.0 的路由、恢复和平台限制。
+
+## 0.9.4 状态说明与按钮位置
+
+状态徽标在上，测试连接、启用/应用更改、停用恢复三个按钮紧接其下。总览“旧网络配置，待重新应用”表示本环境的该工具保存了代理记录，但没有新版独立路由的应用标记；不是网络测试失败，也不表示新版实现没有测试。另一工具完成迁移不改变当前工具标记。安装、刷新状态和测试连接均不会替用户迁移运行配置。
+
+确认当前任务已结束后，在对应工具页面检查地址并点击“应用更改”，确认操作并按提示重载；成功后显示“独立路由配置”。若本地核查错误，总览提示“配置核查异常”。连接探测、已保存的配置方式、真实客户端聊天是否成功是分别判断的。新版原生Linux入口测试已在0.9.0合成目录/凭据/本地503夹具中通过，不是当前用户真实登录或VPN聊天验收；本轮只调整UI，不重复原生路由测试。

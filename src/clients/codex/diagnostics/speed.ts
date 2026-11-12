@@ -4,8 +4,8 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { performance } from 'perf_hooks';
 import { StringDecoder } from 'string_decoder';
-import { SpeedMeasurement } from './measurement';
-import { count, record, SPEED_PROMPT, SpeedMetrics, SpeedUsage } from './types';
+import { SpeedMeasurement } from '../../../speed/measurement';
+import { count, record, SPEED_PROMPT, SpeedMetrics, SpeedUsage } from '../../../speed/types';
 
 /** Official Codex requests use the documented app-server protocol, never copied login tokens. */
 export async function measureOfficialCodex(executable: string, model: string, effort: string, signal: AbortSignal, codexHome?: string, proxyEnv: Record<string, string> = {}): Promise<SpeedMetrics> {

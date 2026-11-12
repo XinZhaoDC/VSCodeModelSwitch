@@ -159,7 +159,8 @@ export interface ModelCacheEntry {
 }
 
 export interface PublicConfigFile {
-  version: 1;
+  version: 1 | 2;
+  organizations?: Partial<Record<ToolId, import('./shared/providers/organization').ProviderOrganization>>;
   currentProviderIds?: Partial<Record<ToolId, string>>;
   providers: ProviderProfile[];
 }

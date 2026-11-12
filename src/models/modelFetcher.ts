@@ -1,3 +1,4 @@
+import { withNetworkTool } from '../network/transport';
 import { isNetworkProxied, networkFetch } from '../network/transport';
 import { promises as dns } from 'dns';
 import * as vscode from 'vscode';
@@ -19,6 +20,10 @@ export class ModelFetchError extends Error {
 }
 
 export async function fetchModels(tool: ToolId, baseUrl: string, apiKey: string, signal?: AbortSignal, proxy?: ProxyConfig): Promise<ModelInfo[]> {
+  return withNetworkTool(tool, () => fetchModelsScoped(tool, baseUrl, apiKey, signal, proxy));
+}
+
+async function fetchModelsScoped(tool: ToolId, baseUrl: string, apiKey: string, signal?: AbortSignal, proxy?: ProxyConfig): Promise<ModelInfo[]> {
   const candidates = buildModelUrls(baseUrl);
   const errors: string[] = [];
   const dnsResult = await resolveEndpointDns(baseUrl);
@@ -67,6 +72,10 @@ export async function fetchModels(tool: ToolId, baseUrl: string, apiKey: string,
 }
 
 export async function testModelsEndpoint(tool: ToolId, baseUrl: string, apiKey: string, signal?: AbortSignal, proxy?: ProxyConfig): Promise<NetworkTestResult> {
+  return withNetworkTool(tool, () => testModelsEndpointScoped(tool, baseUrl, apiKey, signal, proxy));
+}
+
+async function testModelsEndpointScoped(tool: ToolId, baseUrl: string, apiKey: string, signal?: AbortSignal, proxy?: ProxyConfig): Promise<NetworkTestResult> {
   const checkedAt = new Date().toISOString();
   const errors: string[] = [];
   const dnsResult = await resolveEndpointDns(baseUrl);

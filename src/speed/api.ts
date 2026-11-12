@@ -1,4 +1,4 @@
-import { networkFetch } from '../network/transport';
+import { networkFetch, withNetworkTool } from '../network/transport';
 import { performance } from 'perf_hooks';
 import { SpeedMeasurement } from './measurement';
 import { count, record, SPEED_PROMPT, SpeedMetrics, SpeedUsage } from './types';
@@ -16,6 +16,10 @@ export interface ApiSpeedOptions {
 
 /** Meter the actual selected connection. No fallback retries or hidden parameter changes. */
 export async function measureApi(options: ApiSpeedOptions): Promise<SpeedMetrics> {
+  return withNetworkTool(options.protocol === 'anthropic' ? 'claude' : 'codex', () => measureApiScoped(options));
+}
+
+async function measureApiScoped(options: ApiSpeedOptions): Promise<SpeedMetrics> {
   const body = options.protocol === 'anthropic'
     ? { model: options.model, max_tokens: options.maxOutputTokens, stream: true, messages: [{ role: 'user', content: SPEED_PROMPT }] }
     : options.protocol === 'responses'

@@ -1,3 +1,7 @@
+# 0.7.0 network selection
+
+Relays and nested web tools carry their route's tool identity. Outgoing requests use that tool's independent network configuration. Earlier references below to a shared global fetch describe the pre-0.7 transport. Protocol transformation, per-provider settings, request retry and streaming contracts remain applicable.
+
 # Native Claude and Codex proxy
 
 The separate [chat network proxy](network-proxy.md) can carry this API

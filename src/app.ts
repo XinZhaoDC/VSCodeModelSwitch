@@ -1,16 +1,29 @@
+import { importOrganization } from './shared/providers/importOrganization';
+import { ProviderOrganizationStore, emptyOrganization, INDEPENDENT_GROUP, normalizedName } from './shared/providers/organization';
+import { CodexOrganizationController, OrganizationAction } from './clients/codex/organizationController';
+import { setSectionValue } from './config/tomlEdit';
+import { userFacingError } from './ui/locale';
+import { confirmClientChange } from './shared/runtimeGuard';
+import { readOfficialCodexInfo, OfficialCodexInfo } from './clients/codex/diagnostics/info';
+import { ReloadState } from './storage/reloadState';
+import { browseFiles } from './ui/fileBrowser';
+import { historyBackups, removeHistoryBackup } from './storage/historyBackups';
+import { SessionController, SessionAction } from './clients/codex/history/controller';
 import * as fs from 'fs/promises';
 import { basename, dirname, join } from 'path';
 import * as vscode from 'vscode';
-import { ClaudeAdapter } from './adapters/claudeAdapter';
-import { CodexAdapter } from './adapters/codexAdapter';
+import { ClaudeAdapter } from './clients/claude/adapter';
+import { CodexAdapter } from './clients/codex/adapter';
 import { deleteBackups, directorySize, getBackupDirectory, pathExists } from './config/atomicWrite';
 import { buildTemplate, extractConfigValues, redactConfigText, setConfigModel, validateConfigText } from './config/templates';
 import { fetchModels, testModelsEndpoint } from './models/modelFetcher';
 import { defaultUsageQuery, queryUsage } from './models/usageQuery';
 import { verifyModel } from './models/compatibilityCheck';
 import { ModelResolver } from './models/modelResolver';
+import { EnvironmentState } from './storage/environmentState';
 import { ProviderStore } from './storage/providerStore';
 import { SecretStore } from './storage/secretStore';
+import { OperationLog, OperationEvent, operationFailure } from './storage/operationLog';
 import { EnvManager } from './terminal/envManager';
 import { TerminalManager } from './terminal/terminalManager';
 import { ApiStatusKind, ApiStatusRow, CodexMode, CompatibilityResult, ModelInfo, ModelPolicy, NetworkTestResult, ProviderProfile, PublicConfigFile, ResolvedProvider, StatusState, ToolId, ToolRuntimeState, UsageQueryConfig, UsageQueryResult } from './types';
@@ -29,7 +42,7 @@ import { ProxyServer } from './proxy/server';
 import { managedProxyId, proxyClientConfig } from './proxy/applied';
 import { ProxyConfig } from './types';
 import { measureApi } from './speed/api';
-import { measureOfficialCodex } from './speed/codex';
+import { measureOfficialCodex } from './clients/codex/diagnostics/speed';
 import { runSpeedBenchmark } from './speed/runner';
 import { SpeedStore, sameSpeedTarget } from './speed/store';
 import { SpeedTarget, record as speedRecord } from './speed/types';
@@ -37,7 +50,7 @@ import { resolveHomePath } from './utils/paths';
 import { buildAuthHeaderCandidates, buildCompatibilityUrl } from './models/modelFetcher';
 import { resolveProxyOptions } from './proxy/config';
 import { NetworkProxyManager } from './network/manager';
-import { NetworkProxyConfig, disposeNetworkTransport, testNetworkProxy } from './network/transport';
+import { NetworkProxyConfig, disposeNetworkTransport, normalizeNetworkProxy, testNetworkProxy } from './network/transport';
 
 type MenuAction =
   | 'switchProvider'
@@ -54,6 +67,8 @@ interface AppliedProxyRecord { provider: ProviderProfile; port: number; localUrl
 
 export class VSModelSwitchApp implements vscode.Disposable {
   private readonly store: ProviderStore;
+  private readonly codexOrganization: ProviderOrganizationStore;
+  private readonly codexGroups: CodexOrganizationController;
   private readonly secretStore: SecretStore;
   private readonly modelResolver: ModelResolver;
   private readonly envManager: EnvManager;
@@ -61,7 +76,7 @@ export class VSModelSwitchApp implements vscode.Disposable {
   private readonly statusBar = new StatusBarController();
   private outputChannel: vscode.LogOutputChannel;
   private readonly claudeAdapter = new ClaudeAdapter();
-  private readonly codexAdapter = new CodexAdapter();
+  private readonly codexAdapter: CodexAdapter;
   private readonly sidebarView: SidebarViewProvider;
   private readonly fileWatchers: vscode.FileSystemWatcher[] = [];
   private readonly runtimeState: Record<ToolId, ToolRuntimeState>;
@@ -75,17 +90,42 @@ export class VSModelSwitchApp implements vscode.Disposable {
   private readonly appliedRevisions = new Map<string, string>();
   private disposed = false;
   private restoreAttempted = false;
+  private lastBatch?: { tool: ToolId; providerIds: string[]; at: number };
+  private officialInfo?: OfficialCodexInfo;
   private speedStore: SpeedStore;
   private speedController?: AbortController;
+  private readonly reloadNotices: ReloadState;
   private readonly networkProxy: NetworkProxyManager;
+  private readonly sessionController: SessionController;
+  private readonly operationLog: OperationLog;
+  private readonly logReady: Promise<void>;
 
-  constructor(private readonly context: vscode.ExtensionContext) {
-    this.networkProxy = new NetworkProxyManager(context);
+  constructor(private readonly context: vscode.ExtensionContext, private readonly environment = new EnvironmentState(context)) {
+    this.reloadNotices = new ReloadState(environment);
+    this.networkProxy = new NetworkProxyManager(context, environment);
+    const root = environment.get<string>('vscodemodelswitch.codexIdentityStorage');
+    const defaultLogs = root ? join(root, 'environments', environment.id, 'logs') : join(context.globalStorageUri.fsPath, 'environments', environment.id, 'logs');
+    this.operationLog = new OperationLog(environment.get<string>('operationLogDirectory', defaultLogs), environment.id,
+      context.extension?.packageJSON?.version ?? '0.10.0', directory => environment.update('operationLogDirectory', directory));
+    this.logReady = environment.ready;
+    // A transient startup disk error must not permanently reject every later
+    // logging attempt. Each operation retries the write and reports its error.
+    void this.logReady.then(() => this.operationLog.write({ id: randomUUID(), action: 'activate', status: 'succeeded' }))
+      .catch(() => this.outputChannel.warn('Startup operation log unavailable; later operations will retry.'));
+    this.sessionController = new SessionController(context, environment, async root => {
+      await this.logReady;
+      const previous = this.operationLog.directory;
+      await this.moveLogs(join(root, 'environments', environment.id, 'logs'));
+      return () => this.moveLogs(previous);
+    });
+    this.codexAdapter = new CodexAdapter(() => this.sessionController.recoveryDirectory());
     this.speedStore = new SpeedStore(resolveHomePath('.vscodemodelswitch', 'speed'));
     this.outputChannel = vscode.window.createOutputChannel('VSCodeModelSwitch', { log: true });
     this.proxyServer = new ProxyServer(() => { if (!this.disposed) this.refreshStatus(); }, message => { if (!this.disposed) this.outputChannel.info(message); });
-    this.store = new ProviderStore(context);
-    for (const [id, revision] of Object.entries(context.workspaceState.get<Record<string, string>>('vscodemodelswitch.appliedRevisions', {}))) this.appliedRevisions.set(id, revision);
+    this.store = new ProviderStore(context, environment);
+    this.codexOrganization = new ProviderOrganizationStore('codex', context.globalState, environment, () => this.store.getProviders());
+    this.codexGroups = new CodexOrganizationController(this.codexOrganization, () => this.runtimeState.codex.mode === 'api' ? this.runtimeState.codex.matchedProviderId ?? this.store.getCurrentProviderId('codex') : undefined);
+    for (const [id, revision] of Object.entries(environment.get<Record<string, string>>('vscodemodelswitch.appliedRevisions', {}))) this.appliedRevisions.set(id, revision);
     this.secretStore = new SecretStore(context.secrets);
     this.modelResolver = new ModelResolver(this.store);
     this.envManager = new EnvManager(context);
@@ -106,7 +146,7 @@ export class VSModelSwitchApp implements vscode.Disposable {
     );
     this.registerCommands();
     this.registerConfigWatchers();
-    void this.initializeCurrentProviders();
+    void this.initializeCurrentProviders().catch(error => { this.outputChannel.warn(error instanceof Error ? error.message : String(error)); void vscode.window.showErrorMessage('状态读取失败，请点击刷新状态重试。'); });
   }
 
   dispose(): void {
@@ -126,11 +166,16 @@ export class VSModelSwitchApp implements vscode.Disposable {
     const register = (command: string, handler: () => Promise<void> | void) => {
       this.context.subscriptions.push(
         vscode.commands.registerCommand(command, async () => {
+          const id = randomUUID(), action = 'command.' + command.split('.').at(-1), started = Date.now();
           try {
+            await this.recordOperation({ id, action, status: 'started' });
             await handler();
+            await this.recordOperation({ id, action, status: 'succeeded', durationMs: Date.now() - started });
           } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            void vscode.window.showErrorMessage(`VSCodeModelSwitch: ${message}`);
+            await this.recordOperation({ id, action, status: error instanceof Error && error.message.startsWith('已取消') ? 'cancelled' : 'failed',
+              durationMs: Date.now() - started, ...operationFailure(error) }).catch(() => {});
+            const message = userFacingError(error);
+            void vscode.window.showErrorMessage(`AgentDeck：${message}`);
           }
         })
       );
@@ -156,12 +201,19 @@ export class VSModelSwitchApp implements vscode.Disposable {
       )
     );
     const [logBytes, claudeBackupBytes, codexBackupBytes] = await Promise.all([
-      directorySize(this.context.logUri.fsPath),
+      directorySize(this.operationLog.directory),
       directorySize(getBackupDirectory(this.claudeAdapter.getConfigPath())),
       directorySize(getBackupDirectory(this.codexAdapter.getConfigPath()))
     ]);
     const codexMode = this.runtimeState.codex.mode ?? 'unknown';
 
+    const organization = this.codexOrganization.view();
+    for (const provider of providers) if (provider.tool === 'codex') {
+      provider.groupId = organization.memberships[provider.id] ?? INDEPENDENT_GROUP;
+      provider.disabled = organization.disabledProviders.includes(provider.id);
+      provider.groupDisabled = organization.disabledGroups.includes(provider.groupId);
+    }
+    const sessions = await this.sessionController.state();
     const speedReports = await this.speedStore.readAll();
     for (const provider of providers) {
       const saved = this.store.getProvider(provider.id);
@@ -170,8 +222,15 @@ export class VSModelSwitchApp implements vscode.Disposable {
     }
     const officialTarget = this.currentSpeedTargets().codex;
     return {
+      codexOrganization: this.codexOrganization.view(),
+      networkPresets: this.environment.get('networkPresets', { codex: [], claude: [] }),
+      reloadNotices: this.reloadNotices.entries(),
       networkProxy: this.networkProxy.state(),
+      sessions,
+      logDirectory: this.operationLog.directory,
       providers,
+      lastBatch: this.lastBatch,
+      officialInfo: this.officialInfo,
       officialSpeedResult: officialTarget?.mode === 'official' ? await this.speedStore.latest(officialTarget) : undefined,
       speedDirectory: this.speedStore.directory,
       currentProviderIds: this.store.getCurrentProviderIds(),
@@ -198,23 +257,95 @@ export class VSModelSwitchApp implements vscode.Disposable {
   }
 
   async reloadStateFromSidebar(): Promise<void> {
+    await this.logReady;
+    const savedLogs = this.environment.get<string>('operationLogDirectory');
+    if (savedLogs) await this.moveLogs(savedLogs);
+    await this.sessionController.refresh();
+    await this.networkProxy.refresh();
     await this.initializeCurrentProviders();
   }
 
-  async applyNetworkProxyFromSidebar(config: NetworkProxyConfig): Promise<void> {
-    if (this.speedController) throw new Error('Finish or cancel the speed test before changing the network proxy');
-    await this.networkProxy.apply(config);
+  async applyNetworkProxyFromSidebar(config: NetworkProxyConfig, tool?: ToolId): Promise<void> {
+    tool ??= 'codex';
+    if (tool === 'claude' && !await confirmClientChange('Claude Code', '应用网络设置')) throw new Error('已取消：网络设置未更改。');
+    if (this.speedController) throw new Error('请先完成或取消生成测速，再更改网络设置。');
+    if ((tool ?? 'codex') === 'codex' && !await this.sessionController.confirmChange('应用 Codex 网络设置')) throw new Error('已取消，网络设置未更改。');
+    const before = this.networkProxy.state().tools?.[tool!];
+    await this.networkProxy.apply(config, tool);
+    const after = this.networkProxy.state().tools?.[tool!];
+    if (!before?.managed || before.config?.url !== after?.config?.url || before.config?.noProxy !== after?.config?.noProxy) await this.reloadNotices.add(tool!, 'network', '网络启动配置已改变，请重新加载客户端', true);
     await this.refreshNetworkDiagnostics();
   }
 
-  async restoreNetworkProxyFromSidebar(): Promise<void> {
-    if (this.speedController) throw new Error('Finish or cancel the speed test before changing the network proxy');
-    await this.networkProxy.restore();
+  async restoreNetworkProxyFromSidebar(tool?: ToolId): Promise<void> {
+    tool ??= 'codex';
+    if (tool === 'claude' && !await confirmClientChange('Claude Code', '恢复网络设置')) throw new Error('已取消：网络设置未更改。');
+    if (this.speedController) throw new Error('请先完成或取消生成测速，再更改网络设置。');
+    if ((tool ?? 'codex') === 'codex' && !await this.sessionController.confirmChange('恢复 Codex 网络设置')) throw new Error('已取消，网络设置未更改。');
+    await this.networkProxy.restore(tool);
+    await this.reloadNotices.add(tool!, 'network', '原网络配置已恢复，请重新加载客户端', true);
     await this.refreshNetworkDiagnostics();
   }
 
-  async testNetworkProxyFromSidebar(config: NetworkProxyConfig): Promise<void> {
-    this.networkProxy.setTest(await testNetworkProxy(config));
+  async networkClipboardFromSidebar(tool: ToolId, action: 'copy' | 'paste', input?: NetworkProxyConfig): Promise<NetworkProxyConfig | undefined> {
+    if (action === 'copy') { const config = normalizeNetworkProxy(input!); await vscode.env.clipboard.writeText(JSON.stringify({ kind: 'modelswitch-network', version: 1, ...config })); return; }
+    let parsed: any; try { parsed = JSON.parse(await vscode.env.clipboard.readText()); } catch { throw new Error('剪贴板中没有可识别的网络配置。'); }
+    if (parsed.kind !== 'modelswitch-network' || parsed.version !== 1) throw new Error('请先使用“复制设置”复制网络配置。');
+    return normalizeNetworkProxy({ ...parsed, claude: tool === 'claude', codex: tool === 'codex' });
+  }
+  async networkPresetFromSidebar(tool: ToolId, action: 'save' | 'delete', input?: NetworkProxyConfig, name?: string): Promise<void> {
+    const saved = this.environment.get<Record<ToolId, Array<NetworkProxyConfig & { name: string }>>>('networkPresets', { codex: [], claude: [] });
+    if (!name?.trim()) throw new Error('请输入预设名称。');
+    const entries = saved[tool] || []; const next = entries.filter(p => p.name !== name!.trim());
+    if (action === 'save') next.push({ ...normalizeNetworkProxy(input!), name: name.trim().slice(0, 80) });
+    await this.environment.update('networkPresets', { ...saved, [tool]: next });
+  }
+
+  async testNetworkProxyFromSidebar(config: NetworkProxyConfig, tool?: ToolId): Promise<void> {
+    this.networkProxy.setTest(await testNetworkProxy(config), tool);
+    this.refreshStatus();
+  }
+
+  async organizationActionFromSidebar(input: OrganizationAction): Promise<Record<string, unknown>> {
+    this.ensureToolEnabled('codex');
+    const session = await this.sessionController.state();
+    const active = session.identities.find(i => i.id === session.activeId);
+    if (session.restartRequired || (active?.kind ?? this.runtimeState.codex.mode) !== 'api') throw new Error('请先启用 API 模式并重载，再管理 API 群组。');
+    let result: Record<string, unknown>;
+    if (input.action === 'providerTemplate') {
+      this.codexOrganization.assertEnabled(input.providerId!);
+      const group = this.codexOrganization.requireGroup(this.codexOrganization.groupOf(input.providerId!));
+      if (!group.defaults) throw new Error('该群组尚未保存请求处理模板。');
+      const editor = await this.getProviderConfigFromSidebar(input.providerId!);
+      if (group.defaults.baseUrl) editor.text = setSectionValue(editor.text, 'model_providers.OpenAI', 'base_url', group.defaults.baseUrl);
+      if (group.defaults.proxy) editor.proxy = group.defaults.proxy;
+      result = { editor };
+    } else if (input.action === 'networkDraft') {
+      this.codexOrganization.requireGroup(input.groupId!);
+      if (this.codexOrganization.localState().disabledGroups.includes(input.groupId!)) throw new Error('群组已禁用。');
+      const name = this.codexOrganization.localState().groupNetworkPresets[input.groupId!];
+      const presets = this.environment.get<Partial<Record<ToolId, Array<NetworkProxyConfig & { name: string }>>>>('networkPresets', {});
+      const preset = presets.codex?.find(p => p.name === name);
+      if (!preset) throw new Error('本环境没有该网络预设，请先保存网络预设并在群组设置中选择。');
+      result = { networkDraft: { ...preset, claude: false, codex: true } };
+    } else {
+      if (input.action === 'saveGroup' && input.networkPresetName) {
+        const presets = this.environment.get<Partial<Record<ToolId, Array<{ name: string }>>>>('networkPresets', {});
+        if (!presets.codex?.some(p => p.name === input.networkPresetName)) throw new Error('所选本环境网络预设不存在，请刷新后重试。');
+      }
+      result = await this.codexGroups.execute(input);
+    }
+    this.refreshStatus(); return result;
+  }
+
+  async sessionActionFromSidebar(action: SessionAction, id?: string, file?: string): Promise<void> {
+    if (this.speedController) throw new Error('请先完成生成测速，再管理账号档案。');
+    if (action === 'exportProviders') { await this.exportCodexProviders(); return; }
+    if (action === 'manageBackups' || action === 'deleteHistoryBackups') { await this.manageHistoryBackups(action === 'deleteHistoryBackups'); return; }
+    if (action === 'openFolder') { const root = (await this.sessionController.state()).root; if (!root || !await browseFiles(root, '浏览数据文件')) throw new Error('已取消：未打开数据文件。'); return; }
+    if (action === 'help') { const root = (await this.sessionController.state()).root; if (!root) throw new Error('请先连接数据目录。'); await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(vscode.Uri.file(join(root, 'readme.md')))); return; }
+    await this.sessionController.action(action, id, file, this.runtimeState.codex.mode === 'api' ? 'api' : 'official');
+    if (action === 'configure' || action === 'switch') await this.reloadNotices.add('codex', action === 'configure' ? 'storage' : 'mode', '当前历史或账号绑定已改变', true);
     this.refreshStatus();
   }
 
@@ -226,19 +357,20 @@ export class VSModelSwitchApp implements vscode.Disposable {
   }
 
   async setToolEnabledFromSidebar(tool: ToolId, enabled: boolean): Promise<void> {
+    if (tool === 'codex' && enabled !== this.store.getToolEnabled(tool) && !await this.sessionController.confirmChange(enabled ? '启用 Codex 配置管理' : '停用 Codex 配置管理')) throw new Error('已取消：启用状态未更改。');
     await this.store.setToolEnabled(tool, enabled);
     this.refreshStatus();
   }
 
   async testProviderNetworkFromSidebar(providerId: string): Promise<void> {
     const provider = this.store.getProvider(providerId);
-    if (!provider) throw new Error('Provider not found');
-    this.ensureToolEnabled(provider.tool);
+    if (!provider) throw new Error('未找到供应商。');
+    this.ensureProviderEnabled(provider);
     if (provider.tool === 'codex' && provider.codexMode === 'official') throw new Error('Official Codex mode has no API endpoint to test');
     const key = await this.secretStore.get(provider.secretRef);
-    if (!key) throw new Error('Unable to identify API key; enter it again');
+    if (!key) throw new Error('无法识别 API 密钥，请重新填写。');
     const outcome = await vscode.window.withProgress(
-      { location: vscode.ProgressLocation.Notification, title: `Testing ${provider.name}`, cancellable: true },
+      { location: vscode.ProgressLocation.Notification, title: `检查供应商：${provider.name}`, cancellable: true },
       async (_progress, token) => {
         const controller = new AbortController();
         const cancellation = token.onCancellationRequested(() => controller.abort());
@@ -247,7 +379,7 @@ export class VSModelSwitchApp implements vscode.Disposable {
           let usage: UsageQueryResult | undefined;
           if (provider.usageQuery?.enabled && !network.cancelled && !token.isCancellationRequested) {
             const usageToken = await this.secretStore.get(SecretStore.usageRef(provider.id));
-            usage = await queryUsage(provider.usageQuery, provider.baseUrl, key, usageToken, controller.signal);
+            usage = await queryUsage(provider.usageQuery, provider.baseUrl, key, usageToken, controller.signal, provider.tool);
           }
           return { network, usage };
         } finally {
@@ -259,16 +391,27 @@ export class VSModelSwitchApp implements vscode.Disposable {
     if (outcome.usage && outcome.usage.error !== 'Cancelled') this.usageResults.set(provider.id, outcome.usage);
     this.logDiagnostic('network', provider, outcome.network);
     if (outcome.usage) this.logDiagnostic('usage', provider, outcome.usage);
+    if (outcome.network.cancelled || outcome.usage?.error === 'Cancelled') throw new Error('已取消：网络或用量测试。之前的结果保留。');
     await this.scanCurrentProvidersFromConfig();
     this.refreshStatus();
   }
 
   async testToolNetworkFromSidebar(tool: ToolId): Promise<void> {
     this.ensureToolEnabled(tool);
+    let selectedIds: Set<string> | undefined; let includeGeneration = false;
+    if (tool === 'codex') {
+      const choices = this.store.getProvidersByTool(tool).filter(p => p.codexMode !== 'official' && this.providerIsEnabled(p)).map(p => ({ label: p.name, description: p.baseUrl, id: p.id, picked: true }));
+      const selected = await vscode.window.showQuickPick(choices, { title: '选择要诊断的供应商', canPickMany: true });
+      if (!selected?.length) throw new Error('已取消：未选择供应商。');
+      selectedIds = new Set(selected.map(p => p.id));
+      const mode = await vscode.window.showQuickPick([{ label: '连接与模型目录、已启用的额度查询', generation: false }, { label: '同时测试生成与速度（三次请求/供应商，消耗额度）', generation: true }], { title: '选择诊断范围' });
+      if (!mode) throw new Error('已取消：未开始诊断。'); includeGeneration = mode.generation;
+    }
     await vscode.window.withProgress(
-      { location: vscode.ProgressLocation.Notification, title: `Testing all ${labelTool(tool)} providers`, cancellable: true },
+      { location: vscode.ProgressLocation.Notification, title: `批量检查 ${labelTool(tool)} 供应商`, cancellable: true },
       async (progress, token) => {
-        const providers = this.store.getProvidersByTool(tool);
+        const providers = this.store.getProvidersByTool(tool).filter(p => this.providerIsEnabled(p) && (!selectedIds || selectedIds.has(p.id)));
+        this.lastBatch = { tool, providerIds: providers.map(p => p.id), at: Date.now() };
         const controller = new AbortController();
         const cancellation = token.onCancellationRequested(() => controller.abort());
         let nextIndex = 0;
@@ -294,7 +437,7 @@ export class VSModelSwitchApp implements vscode.Disposable {
               this.logDiagnostic('network', provider, result);
               if (provider.usageQuery?.enabled && !result.cancelled && !token.isCancellationRequested) {
                 const usageToken = await this.secretStore.get(SecretStore.usageRef(provider.id));
-                const usage = await queryUsage(provider.usageQuery, provider.baseUrl, key, usageToken, controller.signal);
+                const usage = await queryUsage(provider.usageQuery, provider.baseUrl, key, usageToken, controller.signal, provider.tool);
                 if (usage.error !== 'Cancelled') this.usageResults.set(provider.id, usage);
                 this.logDiagnostic('usage', provider, usage);
               }
@@ -309,6 +452,8 @@ export class VSModelSwitchApp implements vscode.Disposable {
         try {
           const workerCount = Math.min(2, providers.length);
           await Promise.all(Array.from({ length: workerCount }, () => worker()));
+          if (token.isCancellationRequested) throw new Error('已取消：批量网络测试，已完成的结果保留。');
+          if (includeGeneration) for (const provider of providers) { if (token.isCancellationRequested) throw new Error('已取消：批量生成测试。'); if (this.networkTests.get(provider.id)?.ok) await this.speedTestFromSidebar(provider.id, 3); }
           if (completed === 0 && providers.length === 0) progress.report({ increment: 100 });
         } finally {
           cancellation.dispose();
@@ -340,7 +485,7 @@ export class VSModelSwitchApp implements vscode.Disposable {
   async previewModelsFromSidebar(tool: ToolId, baseUrl: string, key: string, proxy?: ProxyConfig): Promise<ModelInfo[]> {
     this.ensureToolEnabled(tool);
     if (!baseUrl.trim() || !key) {
-      throw new Error('URL and key are required before fetching models');
+      throw new Error('获取模型列表前请填写 API 地址和密钥。');
     }
     return this.fetchAndCacheModels(tool, baseUrl.trim(), key, normalizeProxyConfig(proxy, tool));
   }
@@ -349,19 +494,12 @@ export class VSModelSwitchApp implements vscode.Disposable {
     await this.createProvider(input);
   }
 
-  async setCurrentProviderFromSidebar(providerId: string): Promise<void> {
-    const provider = this.store.getProvider(providerId);
-    if (!provider) {
-      throw new Error('Provider not found');
-    }
-    this.ensureToolEnabled(provider.tool);
-    await this.activateProvider(provider);
-  }
+  async setCurrentProviderFromSidebar(providerId: string): Promise<void> { await this.applyProviderFromSidebar(providerId); }
 
   async getProviderConfigFromSidebar(providerId: string): Promise<{ providerId: string; tool: ToolId; text: string; hasKey: boolean; usageQuery: UsageQueryConfig; usageHasToken: boolean; proxy: ProxyConfig; codexMode?: CodexMode }> {
     const provider = this.store.getProvider(providerId);
-    if (!provider) throw new Error('Provider not found');
-    this.ensureToolEnabled(provider.tool);
+    if (!provider) throw new Error('未找到供应商。');
+    this.ensureProviderEnabled(provider);
     return {
       providerId,
       tool: provider.tool,
@@ -376,8 +514,8 @@ export class VSModelSwitchApp implements vscode.Disposable {
 
   async saveProviderConfigFromSidebar(providerId: string, text: string, key?: string, usageQuery?: UsageQueryConfig, usageAccessToken?: string, proxy?: ProxyConfig, codexMode?: CodexMode): Promise<void> {
     const provider = this.store.getProvider(providerId);
-    if (!provider) throw new Error('Provider not found');
-    this.ensureToolEnabled(provider.tool);
+    if (!provider) throw new Error('未找到供应商。');
+    this.ensureProviderEnabled(provider);
     // The configuration editor is the API-provider editor. Official mode is
     // applied from the Codex mode controls and does not have provider fields.
     const effectiveCodexMode = provider.tool === 'codex' ? (codexMode ?? 'api') : undefined;
@@ -390,7 +528,7 @@ export class VSModelSwitchApp implements vscode.Disposable {
       await this.scanCurrentProvidersFromConfig(); this.refreshStatus();
       return;
     }
-    if (!values.baseUrl) throw new Error('Base URL is required');
+    if (!values.baseUrl) throw new Error('请填写 API 地址。');
     const providedKey = key?.trim() || values.key;
     const storedKey = await this.secretStore.get(provider.secretRef);
     const effectiveKey = providedKey || storedKey;
@@ -409,7 +547,7 @@ export class VSModelSwitchApp implements vscode.Disposable {
       updatedAt: new Date(Math.max(Date.now(), new Date(current.updatedAt).getTime() + 1)).toISOString()
     }));
     if (!values.model) {
-      void vscode.window.showWarningMessage(`${provider.name} was saved without a model. Configure a model before using Verify Model.`);
+      void vscode.window.showWarningMessage(`${provider.name} 已保存，但尚未设置模型。请先选择模型，再执行模型验证。`);
     }
     this.clearProviderDiagnostics(provider.id);
     await this.scanCurrentProvidersFromConfig();
@@ -417,17 +555,36 @@ export class VSModelSwitchApp implements vscode.Disposable {
   }
 
   async applyProviderFromSidebar(providerId: string): Promise<void> {
-    const provider = this.store.getProvider(providerId);
-    if (!provider) throw new Error('Provider not found');
-    this.ensureToolEnabled(provider.tool);
-    await this.activateProvider(provider);
+    const provider = this.store.getProvider(providerId); if (!provider) throw new Error('未找到供应商。');
+    const previousMode = this.runtimeState.codex.mode;
+    this.ensureProviderEnabled(provider); await this.activateProvider(provider);
+    if (provider.tool === 'codex') await this.reloadNotices.add('codex', previousMode === 'api' ? 'providers' : 'mode', previousMode === 'api' ? '供应商配置已写入；已有对话可能需要重新打开' : '登录方式已改变，请重新加载窗口', previousMode !== 'api');
+    this.refreshStatus();
   }
 
   async applyCodexModeFromSidebar(mode: CodexMode): Promise<void> {
     this.ensureToolEnabled('codex');
+    const session = await this.sessionController.state();
+    if (session.restartRequired) throw new Error('身份已更改。请先点击「重载窗口」，再使用 Codex 或应用供应商。');
+    const active = session.identities.find(identity => identity.id === session.activeId);
+    if (session.root && active?.kind !== mode) {
+      await this.sessionController.prepareMode(mode);
+      await this.reloadNotices.add('codex', 'mode', '账号历史绑定已改变，请重新加载窗口', true);
+      this.refreshStatus(); return;
+    }
+    if (!session.root && this.runtimeState.codex.mode !== mode) {
+      // Preserve the current account/API home first; this action does not write
+      // the other mode into an unmanaged history and authentication directory.
+      await this.sessionController.action('configure', undefined, undefined, this.runtimeState.codex.mode === 'api' ? 'api' : 'official');
+      await this.reloadNotices.add('codex', 'storage', '数据目录已连接，请重新加载窗口', true);
+      this.refreshStatus(); return;
+    }
+    await this.sessionController.ensureMode(mode);
     if (mode === 'official') {
+      if (!await this.sessionController.confirmChange('应用官方账号配置')) throw new Error('已取消，配置未更改。');
       await this.codexAdapter.applyOfficialMode();
-      await this.context.workspaceState.update('vscodemodelswitch.appliedCodexProxy', undefined);
+      await this.reloadNotices.add('codex', 'mode', '登录方式已改变，请重新加载窗口', true);
+      await this.context.workspaceState.update(this.environment.key('vscodemodelswitch.appliedCodexProxy'), undefined);
       for (const provider of this.store.getProvidersByTool('codex')) this.proxyServer.stopRoute(provider.id);
       delete this.lastEnv.OPENAI_BASE_URL; delete this.lastEnv.OPENAI_API_KEY;
       this.lastEnv = { ...this.lastEnv, ...this.envManager.apply({
@@ -451,29 +608,35 @@ export class VSModelSwitchApp implements vscode.Disposable {
     }
 
     const current = this.store.getCurrentProvider('codex');
-    const provider = current && current.codexMode !== 'official'
+    let provider = current && current.codexMode !== 'official'
       ? current
       : this.store.getProvidersByTool('codex').find(item => item.codexMode !== 'official');
+    const candidates = this.store.getProvidersByTool('codex').filter(item => item.codexMode !== 'official');
+    if ((!current || current.codexMode === 'official') && candidates.length > 1) {
+      const selected = await vscode.window.showQuickPick(candidates.map(item => ({ label: item.name, description: item.baseUrl, provider: item })), { title: '选择要在当前 API 档案中应用的供应商' });
+      if (!selected) throw new Error('已取消：未应用 API 供应商。');
+      provider = selected.provider;
+    }
     if (!provider) {
-      throw new Error('Add a Codex API provider before applying API mode');
+      throw new Error('请先添加 Codex API 供应商，再应用 API 模式。');
     }
     await this.activateProvider(provider);
   }
 
   async testUsageQueryFromSidebar(providerId: string, usageQuery: UsageQueryConfig, usageAccessToken?: string): Promise<void> {
     const provider = this.store.getProvider(providerId);
-    if (!provider) throw new Error('Provider not found');
-    this.ensureToolEnabled(provider.tool);
+    if (!provider) throw new Error('未找到供应商。');
+    this.ensureProviderEnabled(provider);
     const key = provider.codexMode === 'official' ? '' : await this.secretStore.get(provider.secretRef);
-    if (!key) throw new Error('Unable to identify API key; enter it again');
+    if (!key) throw new Error('无法识别 API 密钥，请重新填写。');
     const storedUsageToken = usageAccessToken?.trim() || await this.secretStore.get(SecretStore.usageRef(provider.id));
     const result = await vscode.window.withProgress(
-      { location: vscode.ProgressLocation.Notification, title: `Querying usage for ${provider.name}`, cancellable: true },
+      { location: vscode.ProgressLocation.Notification, title: `查询额度：${provider.name}`, cancellable: true },
       async (_progress, token) => {
         const controller = new AbortController();
         const cancellation = token.onCancellationRequested(() => controller.abort());
         try {
-          return await queryUsage(usageQuery, provider.baseUrl, key, storedUsageToken, controller.signal);
+          return await queryUsage(usageQuery, provider.baseUrl, key, storedUsageToken, controller.signal, provider.tool);
         } finally {
           cancellation.dispose();
         }
@@ -481,22 +644,23 @@ export class VSModelSwitchApp implements vscode.Disposable {
     );
     if (result.error !== 'Cancelled') this.usageResults.set(provider.id, result);
     this.logDiagnostic('usage', provider, result);
+    if (result.error === 'Cancelled') throw new Error('已取消：用量查询，之前的结果保留。');
     this.refreshStatus();
   }
 
   async verifyProviderModelFromSidebar(providerId: string): Promise<void> {
     const provider = this.store.getProvider(providerId);
-    if (!provider) throw new Error('Provider not found');
-    this.ensureToolEnabled(provider.tool);
+    if (!provider) throw new Error('未找到供应商。');
+    this.ensureProviderEnabled(provider);
     if (provider.tool === 'codex' && provider.codexMode === 'official') throw new Error('Official Codex mode has no API model verification');
     const key = await this.secretStore.get(provider.secretRef);
-    if (!key) throw new Error('Unable to identify API key; enter it again');
+    if (!key) throw new Error('无法识别 API 密钥，请重新填写。');
     const model = provider.modelPolicy.type === 'fixed' || provider.modelPolicy.type === 'custom'
       ? provider.modelPolicy.model
       : provider.modelPolicy.type === 'providerAuto' ? provider.modelPolicy.preferred ?? '' : '';
-    if (!model) throw new Error('Model is required');
+    if (!model) throw new Error('请先选择模型。');
     const result = await vscode.window.withProgress(
-      { location: vscode.ProgressLocation.Notification, title: `Verifying ${provider.name}`, cancellable: true },
+      { location: vscode.ProgressLocation.Notification, title: `验证模型：${provider.name}`, cancellable: true },
       async (_progress, token) => {
         const controller = new AbortController();
         const cancellation = token.onCancellationRequested(() => controller.abort());
@@ -512,6 +676,7 @@ export class VSModelSwitchApp implements vscode.Disposable {
     );
     if (!result.cancelled) this.compatibilityResults.set(provider.id, result);
     this.logDiagnostic('compatibility', provider, result);
+    if (result.cancelled) throw new Error('已取消：模型验证，之前的结果保留。');
     await this.scanCurrentProvidersFromConfig();
     this.refreshStatus();
   }
@@ -519,12 +684,12 @@ export class VSModelSwitchApp implements vscode.Disposable {
   private providerSpeedTarget(provider: ProviderProfile): SpeedTarget {
     const model = provider.modelPolicy.type === 'fixed' || provider.modelPolicy.type === 'custom'
       ? provider.modelPolicy.model : provider.modelPolicy.type === 'providerAuto' ? provider.modelPolicy.preferred ?? 'auto' : 'auto';
-    return { tool: provider.tool, mode: provider.codexMode === 'official' ? 'official' : 'api', providerId: provider.id, providerName: provider.name, model, configRevision: this.networkRevision(provider.updatedAt) };
+    return { tool: provider.tool, mode: provider.codexMode === 'official' ? 'official' : 'api', providerId: provider.id, providerName: provider.name, model, configRevision: this.networkRevision(provider.updatedAt, provider.tool) };
   }
 
-  private networkRevision(revision: string): string {
-    const config = this.networkProxy?.state().config;
-    return config ? revision + ':network:' + fingerprintSecret(JSON.stringify(config)) : revision;
+  private networkRevision(revision: string, tool: ToolId): string {
+    const config = this.networkProxy?.state().tools?.[tool]?.config;
+    return config ? revision + ':network:' + fingerprintSecret(JSON.stringify({ url: config.url, noProxy: config.noProxy })) : revision;
   }
 
   private currentSpeedTargets(): Partial<Record<ToolId, SpeedTarget>> {
@@ -534,10 +699,10 @@ export class VSModelSwitchApp implements vscode.Disposable {
       const runtime = this.runtimeState[tool];
       if (tool === 'codex' && runtime.mode === 'official') {
         const model = runtime.model || 'auto';
-        targets.codex = { tool, mode: 'official', providerId: 'codex-official', providerName: 'Official account', model, configRevision: this.networkRevision('official:' + model) };
+        targets.codex = { tool, mode: 'official', providerId: 'codex-official', providerName: 'Official account', model, configRevision: this.networkRevision('official:' + model + ':identity:' + (this.sessionController.activeId ?? 'unmanaged'), tool) };
       } else if (runtime.matchedProviderId) {
         const provider = this.store.getProvider(runtime.matchedProviderId);
-        if (provider) targets[tool] = { ...this.providerSpeedTarget(provider), model: runtime.model || this.providerSpeedTarget(provider).model, configRevision: this.networkRevision(this.appliedRevisions.get(provider.id) ?? provider.updatedAt) };
+        if (provider) targets[tool] = { ...this.providerSpeedTarget(provider), model: runtime.model || this.providerSpeedTarget(provider).model, configRevision: this.networkRevision(this.appliedRevisions.get(provider.id) ?? provider.updatedAt, tool) };
       }
     }
     return targets;
@@ -559,20 +724,22 @@ export class VSModelSwitchApp implements vscode.Disposable {
   }
 
   async speedTestFromSidebar(providerId: string | undefined, runs: 1 | 3): Promise<void> {
-    if (runs !== 1 && runs !== 3) throw new Error('Choose one or three speed samples');
-    if (this.speedController) throw new Error('A speed test is already running');
+    if (runs !== 1 && runs !== 3) throw new Error('请选择一次或三次测速请求。');
+    if (this.speedController) throw new Error('已有生成测速正在运行。');
     const provider = providerId ? this.store.getProvider(providerId) : undefined;
-    if (providerId && !provider) throw new Error('Provider not found');
+    if (providerId && !provider) throw new Error('未找到供应商。');
     const target = provider ? this.providerSpeedTarget(provider) : this.currentSpeedTargets().codex;
-    if (!target) throw new Error('Select an official Codex account or an API provider first');
+    if (!target) throw new Error('请先选择 Codex 官方账号或 API 供应商。');
+    if (provider) this.ensureProviderEnabled(provider);
     this.ensureToolEnabled(target.tool);
+    if (target.tool === 'codex') this.sessionController.assertReady();
     // Official probes must use the active official login, never silently switch an API account.
-    if (target.mode === 'official' && this.runtimeState.codex.mode !== 'official') throw new Error('Select official Codex mode before testing that account');
+    if (target.mode === 'official' && this.runtimeState.codex.mode !== 'official') throw new Error('请先切换到 Codex 官方账号模式，再测试当前账号。');
     if (target.mode === 'official' && provider) {
       const current = this.currentSpeedTargets().codex!;
       Object.assign(target, current);
     }
-    if (target.mode === 'api' && target.model === 'auto') throw new Error('Choose a model before running an API speed test');
+    if (target.mode === 'api' && target.model === 'auto') throw new Error('请先选择模型，再执行 API 生成测速。');
     const controller = new AbortController(); this.speedController = controller;
     const speedStore = this.speedStore;
     const probeId = (provider?.id ?? 'codex-official') + '--speed-' + randomUUID();
@@ -580,7 +747,7 @@ export class VSModelSwitchApp implements vscode.Disposable {
     let registered = false;
     try {
       const key = provider && target.mode === 'api' ? await this.secretStore.get(provider.secretRef) : undefined;
-      if (target.mode === 'api' && !key) throw new Error('Provider API key is missing');
+      if (target.mode === 'api' && !key) throw new Error('当前环境尚未保存供应商 API 密钥。');
       let endpoint = { baseUrl: provider?.baseUrl ?? '', key: key ?? '' };
       if (provider?.proxy?.mode === 'proxy' && target.mode === 'api') {
         endpoint = await this.proxyServer.register(probeId, provider.baseUrl, key!, target.model, normalizeProxyConfig(provider.proxy, provider.tool), provider.tool);
@@ -590,7 +757,7 @@ export class VSModelSwitchApp implements vscode.Disposable {
       const protocol = target.tool === 'claude' ? 'anthropic' : provider?.proxy?.mode !== 'proxy' && provider?.codex?.wireApi === 'chat' ? 'chat' : 'responses';
       const codexExecutable = target.mode === 'official' ? await this.codexSpeedExecutable() : '';
       const report = await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, title: `Speed test: ${target.providerName} (${runs} paid sample${runs === 1 ? '' : 's'})`, cancellable: true },
+        { location: vscode.ProgressLocation.Notification, title: `生成测速：${target.providerName}（${runs} 次请求，消耗额度）`, cancellable: true },
         async (progress, token) => {
           const cancellation = token.onCancellationRequested(() => controller.abort());
           try {
@@ -600,7 +767,7 @@ export class VSModelSwitchApp implements vscode.Disposable {
               : measureApi({ protocol, url: buildCompatibilityUrl(target.tool, endpoint.baseUrl).replace(/\/responses$/, protocol === 'chat' ? '/chat/completions' : '/responses'),
                   headers: Object.assign({}, ...buildAuthHeaderCandidates(target.tool, endpoint.key)), model: target.model, effort,
                   maxOutputTokens: 512, signal, timingSource: proxyOptions?.rebuildStream ? 'buffered-proxy' : 'native-stream' }),
-              { signal: controller.signal, effort, timeoutMs: 120_000, maxOutputTokens: target.mode === 'official' ? null : 512, progress: index => progress.report({ message: `Sample ${index}/${runs}` }) });
+              { signal: controller.signal, effort, timeoutMs: 120_000, maxOutputTokens: target.mode === 'official' ? null : 512, progress: index => progress.report({ message: `第 ${index}/${runs} 次请求` }) });
           } finally { cancellation.dispose(); }
         });
       report.connection = { mode: target.mode === 'official' ? 'codex-app-server' : registered ? 'built-in-proxy' : 'direct', protocol: target.mode === 'official' ? 'codex-app-server' : protocol,
@@ -609,7 +776,7 @@ export class VSModelSwitchApp implements vscode.Disposable {
       await speedStore.save(report);
       await speedStore.writeCurrent({ updatedAt: new Date().toISOString(), tools: this.currentSpeedTargets() });
       this.outputChannel.info(`speed: ${report.id} ${report.summary.succeeded}/${report.parameters.runs} samples; results ${speedStore.directory}`);
-      if (report.summary.failed) void vscode.window.showWarningMessage(`Speed test stopped after a failed sample. See the saved result: ${speedStore.directory}`);
+      // The sidebar reports failed/cancelled samples at the originating card.
     } finally {
       if (registered) this.proxyServer.remove(probeId);
       this.speedController = undefined;
@@ -618,36 +785,36 @@ export class VSModelSwitchApp implements vscode.Disposable {
   }
 
   private async chooseSpeedTest(): Promise<void> {
-    const items: Array<vscode.QuickPickItem & { providerId?: string }> = this.store.getProviders().filter(provider => provider.codexMode !== 'official').map(provider => ({ label: provider.name, description: provider.tool, providerId: provider.id }));
-    if (this.runtimeState.codex.mode === 'official') items.unshift({ label: 'Official Codex account' });
-    const chosen = await vscode.window.showQuickPick(items, { title: 'Choose speed-test connection (uses model quota)' });
+    const items: Array<vscode.QuickPickItem & { providerId?: string }> = this.store.getProviders().filter(provider => provider.codexMode !== 'official' && this.providerIsEnabled(provider)).map(provider => ({ label: provider.name, description: provider.tool, providerId: provider.id }));
+    if (this.runtimeState.codex.mode === 'official') items.unshift({ label: 'Codex 官方账号' });
+    const chosen = await vscode.window.showQuickPick(items, { title: '选择测速连接（消耗模型额度）' });
     if (!chosen) return;
-    const count = await vscode.window.showQuickPick([{ label: 'Quick: one sample', runs: 1 as const }, { label: 'Standard: three samples', runs: 3 as const }], { title: 'Fixed short text; each sample uses model quota' });
+    const count = await vscode.window.showQuickPick([{ label: '快速：一次请求', runs: 1 as const }, { label: '标准：三次请求', runs: 3 as const }], { title: '使用固定短文本，每次请求消耗模型额度' });
     if (count) await this.speedTestFromSidebar(chosen.providerId, count.runs);
   }
 
   async copySpeedQuery(): Promise<void> {
-    const tool = await vscode.window.showQuickPick(['codex', 'claude'], { title: 'Copy read-only AI speed query command' });
+    const tool = await vscode.window.showQuickPick(['codex', 'claude'], { title: '复制只读测速查询命令' });
     if (!tool) return;
     const quote = (value: string) => process.platform === 'win32' ? "'" + value.replace(/'/g, "''") + "'" : "'" + value.replace(/'/g, "'\"'\"'") + "'";
     const command = `node ${quote(join(this.context.extensionUri.fsPath, 'out', 'speed', 'query.js'))} --tool ${tool} --directory ${quote(this.speedStore.directory)}`;
     await vscode.env.clipboard.writeText(command);
-    void vscode.window.showInformationMessage('Read-only query copied. Run it in a Node.js terminal, or give it to your AI. It does not make a model request.');
+    void vscode.window.showInformationMessage('已复制只读测速查询命令。可在 Node.js 终端运行，或交给 AI 读取；不会发起新的模型请求。');
   }
 
   async deleteProviderFromSidebar(providerId: string): Promise<void> {
     const provider = this.store.getProvider(providerId);
-    if (!provider) throw new Error('Provider not found');
-    this.ensureToolEnabled(provider.tool);
+    if (!provider) throw new Error('未找到供应商。');
+    this.ensureProviderEnabled(provider);
     const confirmation = await vscode.window.showWarningMessage(
-      `Delete ${provider.name}? The stored API key will also be deleted. Applied config files will be kept.`,
+      `删除供应商“${provider.name}”？已保存的 API 密钥也会删除，已经写入的客户端配置文件保留。`,
       { modal: true },
-      'Delete'
+      { title: '删除' }, { title: '取消', isCloseAffordance: true }
     );
-    if (confirmation !== 'Delete') return;
+    if (confirmation?.title !== '删除') return;
     await this.secretStore.delete(provider.secretRef);
     await this.secretStore.delete(SecretStore.usageRef(provider.id));
-    await this.secretStore.delete(SecretStore.ref(provider.id, provider.tool) + '.applied');
+    await this.secretStore.delete(this.environment.key(SecretStore.ref(provider.id, provider.tool) + '.applied'));
     await this.store.deleteProvider(providerId);
     this.proxyServer.remove(providerId);
     this.appliedRevisions.delete(providerId);
@@ -657,11 +824,11 @@ export class VSModelSwitchApp implements vscode.Disposable {
   }
 
   async moveProviderFromSidebar(providerId: string, beforeProviderId: string): Promise<void> {
-    const provider = this.store.getProvider(providerId);
-    const target = this.store.getProvider(beforeProviderId);
-    if (!provider || !target || provider.tool !== target.tool) throw new Error('Providers must belong to the same tool');
+    const provider = this.store.getProvider(providerId), target = this.store.getProvider(beforeProviderId);
+    if (!provider || !target || provider.tool !== target.tool) throw new Error('供应商必须属于同一客户端。');
     this.ensureToolEnabled(provider.tool);
-    await this.store.moveProvider(providerId, beforeProviderId);
+    if (provider.tool === 'codex') await this.codexOrganization.moveProvider(providerId, this.codexOrganization.groupOf(beforeProviderId), beforeProviderId);
+    else await this.store.moveProvider(providerId, beforeProviderId);
     this.refreshStatus();
   }
 
@@ -669,12 +836,18 @@ export class VSModelSwitchApp implements vscode.Disposable {
     this.ensureToolEnabled(tool);
     const path = tool === 'claude' ? this.claudeAdapter.getConfigPath() : this.codexAdapter.getConfigPath();
     const count = await vscode.window.showWarningMessage(
-      `Delete all ${labelTool(tool)} backups?`,
+      `删除 ${labelTool(tool)} 的全部旧版配置备份？`,
       { modal: true },
-      'Delete'
+      { title: '删除' }, { title: '取消', isCloseAffordance: true }
     );
-    if (count !== 'Delete') return;
+    if (count?.title !== '删除') return;
     await deleteBackups(path);
+  }
+
+  private providerIsEnabled(provider: ProviderProfile): boolean { return provider.tool !== 'codex' || !this.codexOrganization || this.codexOrganization.isEnabled(provider.id); }
+  private ensureProviderEnabled(provider: ProviderProfile): void {
+    this.ensureToolEnabled(provider.tool);
+    if (provider.tool === 'codex') this.codexOrganization?.assertEnabled(provider.id);
   }
 
   private async validateProviderUniqueness(
@@ -688,16 +861,29 @@ export class VSModelSwitchApp implements vscode.Disposable {
     for (const provider of this.store.getProviders()) {
       if (provider.id === excludedProviderId) continue;
       if (provider.tool === tool && normalizeProviderName(provider.name) === normalizeProviderName(name)) {
-        throw new Error('A provider with this name already exists');
+        throw new Error('已存在同名供应商。');
       }
       const existingKey = await this.secretStore.get(provider.secretRef);
       if (existingKey !== key) continue;
       keyAlreadySaved = true;
       if (provider.tool === tool && normalizeBaseUrl(provider.baseUrl) === normalizeBaseUrl(baseUrl)) {
-        throw new Error('A provider with this Base URL and API key already exists');
+        throw new Error('已存在使用相同 API 地址和密钥的供应商。');
       }
     }
-    if (keyAlreadySaved) void vscode.window.showWarningMessage('This API key is already saved by another provider.');
+    if (keyAlreadySaved) void vscode.window.showWarningMessage('另一个供应商已经保存了相同的 API 密钥。');
+  }
+
+  async officialInfoFromSidebar(): Promise<void> {
+    await this.sessionController.ensureMode('official');
+    if (this.runtimeState.codex.mode !== 'official') throw new Error('请先使用官方账号模式。');
+    this.officialInfo = await readOfficialCodexInfo(await this.codexSpeedExecutable(), this.codexAdapter.getConfigPath().replace(/[\\/]config[.]toml$/, ''), this.networkProxy.environment('codex'));
+    this.refreshStatus();
+  }
+  async refreshProviderModelsFromSidebar(providerId: string): Promise<void> {
+    const provider = this.store.getProvider(providerId); if (!provider) throw new Error('未找到供应商。');
+    this.ensureProviderEnabled(provider);
+    const key = await this.secretStore.get(provider.secretRef); if (!key) throw new Error('请先配置 API Key。');
+    await this.fetchAndCacheModels(provider.tool, provider.baseUrl, key, provider.proxy);
   }
 
   async updateProviderModelFromSidebar(providerId: string): Promise<void> {
@@ -720,26 +906,28 @@ export class VSModelSwitchApp implements vscode.Disposable {
     await this.viewConfig(tool);
   }
 
-  async exportPublicConfigFromSidebar(): Promise<void> {
-    await this.exportPublicConfig();
+  async exportPublicConfigFromSidebar(tool?: ToolId): Promise<void> {
+    await this.exportPublicConfig(tool);
   }
 
-  async importPublicConfigFromSidebar(): Promise<void> {
-    await this.importPublicConfig();
+  async importPublicConfigFromSidebar(tool?: ToolId): Promise<void> {
+    await this.importPublicConfig(tool);
   }
 
   async clearLogFromSidebar(): Promise<boolean> {
     const confirmation = await vscode.window.showWarningMessage(
-      'Clear the VSCodeModelSwitch output log for this session?',
+      '删除当前环境的插件操作日志及本窗口输出日志？不会删除配置、账号、聊天、备份或恢复材料。日志目录：' + this.operationLog.directory,
       { modal: true },
-      'Delete Log'
+      { title: '删除日志' }, { title: '取消', isCloseAffordance: true }
     );
-    if (confirmation !== 'Delete Log') return false;
+    if (confirmation?.title !== '删除日志') return false;
+    await this.logReady;
+    await this.operationLog.clear();
     this.outputChannel.dispose();
     try {
-      const entries = await fs.readdir(this.context.logUri.fsPath, { withFileTypes: true }).catch(() => []);
+      const entries = await fs.readdir(this.context.logUri.fsPath, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'ENOENT') throw error; return []; });
       for (const entry of entries) {
-        if (!entry.isFile()) continue;
+        if (!entry.isFile() || !/^VSCodeModelSwitch(?:[.-][a-zA-Z0-9_-]+)?[.]log$/.test(entry.name)) continue;
         await fs.unlink(vscode.Uri.joinPath(this.context.logUri, entry.name).fsPath);
       }
     } finally {
@@ -748,12 +936,53 @@ export class VSModelSwitchApp implements vscode.Disposable {
     return true;
   }
 
+  async recordOperation(event: OperationEvent): Promise<void> {
+    await this.logReady;
+    await this.operationLog.write(event);
+  }
+
+  private async moveLogs(directory: string): Promise<void> {
+    if (directory === this.operationLog.directory) return;
+    const id = randomUUID(), previous = this.operationLog.directory;
+    await this.recordOperation({ id, action: 'logs.move', status: 'started' });
+    try {
+      await this.operationLog.move(directory);
+      await this.recordOperation({ id, action: 'logs.move', status: 'succeeded' });
+    } catch (error) {
+      if (this.operationLog.directory !== previous) await this.operationLog.move(previous);
+      await this.recordOperation({ id, action: 'logs.move', status: 'failed', ...operationFailure(error) }).catch(() => {});
+      throw error;
+    }
+  }
+
+  async logActionFromSidebar(action: 'view' | 'folder' | 'export'): Promise<void> {
+    await this.logReady;
+    if (action === 'folder') {
+      await fs.mkdir(this.operationLog.directory, { recursive: true, mode: 0o700 });
+      if (!await browseFiles(this.operationLog.directory, '浏览操作日志', /[.](?:log|jsonl)$/i)) throw new Error('已取消：未打开日志。');
+    } else if (action === 'view') {
+      const document = await vscode.workspace.openTextDocument({ content: await this.operationLog.text(), language: 'jsonl' });
+      await vscode.window.showTextDocument(document, { preview: false });
+    } else {
+      const uri = await vscode.window.showSaveDialog({ title: '导出操作诊断日志（不含聊天或认证）', filters: { JSONL: ['jsonl'] }, saveLabel: '导出' });
+      if (!uri) throw new Error('已取消：未导出日志。');
+      await fs.writeFile(uri.fsPath, await this.operationLog.text(), { mode: 0o600 });
+    }
+  }
+
   private refreshStatus(): void {
     this.statusBar.update(this.runtimeState);
     void this.sidebarView.refresh();
   }
 
   private async initializeCurrentProviders(): Promise<void> {
+    await this.environment.ready;
+    await this.sessionController.ready;
+    await this.networkProxy.ready;
+    if (!this.restoreAttempted) {
+      try { const recovered = await this.codexAdapter.recoverPending(); if (recovered) void vscode.window.showInformationMessage(recovered); }
+      catch (error) { this.sessionController.reportRecoveryFailure(error); void vscode.window.showErrorMessage(userFacingError(error)); }
+    }
     const firstInitialization = !this.restoreAttempted;
     if (!this.restoreAttempted) {
       this.restoreAttempted = true;
@@ -761,10 +990,12 @@ export class VSModelSwitchApp implements vscode.Disposable {
     }
     await this.scanCurrentProvidersFromConfig();
     if (firstInitialization) {
+      const session = await this.sessionController.state();
+      await this.reloadNotices.acknowledgeStartup(notice => notice.section === 'network' ? !this.networkProxy.state().tools?.[notice.tool]?.error : !this.sessionController.recoveryBlocked && (!session.root || session.attached) && this.runtimeState.codex.mode !== 'unknown');
       for (const provider of Object.values(this.store.getCurrentProviders())) {
         if (provider && !this.appliedRevisions.has(provider.id)) this.appliedRevisions.set(provider.id, provider.updatedAt);
       }
-      await this.context.workspaceState.update('vscodemodelswitch.appliedRevisions', Object.fromEntries(this.appliedRevisions));
+      await this.environment.update('vscodemodelswitch.appliedRevisions', Object.fromEntries(this.appliedRevisions));
     }
     const hasCurrent = Boolean(this.store.getCurrentProvider('claude') || this.store.getCurrentProvider('codex'));
     this.status = hasCurrent ? { kind: 'ready' } : { kind: 'off' };
@@ -784,7 +1015,8 @@ export class VSModelSwitchApp implements vscode.Disposable {
 
     const localId = managedProxyId(claudeConfig.baseUrl, claudeConfig.key);
     const synced = vscode.workspace.getConfiguration('vscodemodelswitch').get<boolean>('globalCliSync', true);
-    const claude = !synced ? this.store.getCurrentProvider('claude') : localId ? providers.find(p => p.tool === 'claude' && p.id === localId) : await matchProviderFromConfig(providers, 'claude', claudeConfig.baseUrl, claudeConfig.key, this.secretStore);
+    let claude = !synced ? this.store.getCurrentProvider('claude') : localId ? providers.find(p => p.tool === 'claude' && p.id === localId) : await matchProviderFromConfig(providers, 'claude', claudeConfig.baseUrl, claudeConfig.key, this.secretStore);
+    claude = await this.reconcileObservedProvider('claude', claude, claudeConfig, synced);
     const effectiveClaude = synced ? claudeConfig : { baseUrl: this.lastEnv.ANTHROPIC_BASE_URL, key: this.lastEnv.ANTHROPIC_AUTH_TOKEN, model: this.lastEnv.ANTHROPIC_MODEL };
     if (claude) {
       await this.store.setCurrentProviderId('claude', claude.id);
@@ -803,10 +1035,11 @@ export class VSModelSwitchApp implements vscode.Disposable {
 
     const codexLocalId = managedProxyId(codexConfig.baseUrl, codexConfig.key);
     const codexMode = !synced && this.lastEnv.OPENAI_BASE_URL ? 'api' : codexConfig.mode ?? 'unknown';
-    const codex = codexMode === 'official' ? providers.find(provider => provider.tool === 'codex' && provider.codexMode === 'official')
+    let codex = codexMode === 'official' ? providers.find(provider => provider.tool === 'codex' && provider.codexMode === 'official')
       : !synced ? this.store.getCurrentProvider('codex') : codexLocalId
       ? providers.find(provider => provider.tool === 'codex' && provider.id === codexLocalId)
       : await matchProviderFromConfig(providers, 'codex', codexConfig.baseUrl, codexConfig.key, this.secretStore);
+    codex = await this.reconcileObservedProvider('codex', codex, { ...codexConfig, mode: codexMode }, synced);
     if (codex) {
       await this.store.setCurrentProviderId('codex', codex.id);
     } else {
@@ -826,6 +1059,24 @@ export class VSModelSwitchApp implements vscode.Disposable {
       configPath: this.codexAdapter.getConfigPath()
     };
     await this.speedStore.writeCurrent({ updatedAt: new Date().toISOString(), tools: this.currentSpeedTargets() });
+  }
+
+  /** A shared definition/key edit must not deselect the configuration already
+   * applied here. Only reuse the old match while the local CLI signature agrees. */
+  private async reconcileObservedProvider(tool: ToolId, matched: ProviderProfile | undefined,
+    config: { baseUrl?: string; key?: string; mode?: string }, synced: boolean): Promise<ProviderProfile | undefined> {
+    if (!synced) return matched;
+    const key = 'vscodemodelswitch.observedConfig.' + tool;
+    const signature = fingerprintSecret(JSON.stringify([config.mode ?? 'api', normalizeBaseUrl(config.baseUrl ?? ''), fingerprintSecret(config.key ?? '')]));
+    const previous = this.environment.get<{ signature: string; providerId: string } | undefined>(key);
+    if (!matched && previous?.signature === signature) {
+      const provider = this.store.getProvider(previous.providerId);
+      if (provider?.tool === tool) matched = provider;
+    }
+    if (matched && (previous?.signature !== signature || previous.providerId !== matched.id)) {
+      await this.environment.update(key, { signature, providerId: matched.id });
+    }
+    return matched;
   }
 
   private async determineToolStatus(
@@ -869,7 +1120,13 @@ export class VSModelSwitchApp implements vscode.Disposable {
   }
 
   private logDiagnostic(kind: string, provider: ProviderProfile, result: unknown): void {
-    this.outputChannel.info(`${kind} ${provider.tool}/${provider.name}: ${JSON.stringify(result)}`);
+    const value = result as { ok?: boolean; httpStatus?: number; latencyMs?: number; cancelled?: boolean; error?: string };
+    const status = value.cancelled || value.error === 'Cancelled' ? 'cancelled' : value.ok ? 'succeeded' : 'failed';
+    this.outputChannel.info(`${kind} ${provider.tool}/${provider.id}: ${status}; HTTP ${value.httpStatus ?? 'n/a'}; ${value.latencyMs ?? 'n/a'} ms`);
+    void this.recordOperation({ id: randomUUID(), action: 'diagnostic.' + kind, status,
+      target: provider.tool + ':provider:' + provider.id, httpStatus: value.httpStatus, latencyMs: value.latencyMs,
+      ...(status === 'failed' ? operationFailure(new Error(value.error ?? '')) : {})
+    }).catch(() => this.outputChannel.warn('Diagnostic operation log could not be written.'));
   }
 
   private isModelCacheStale(tool: ToolId, baseUrl: string, key: string): boolean {
@@ -898,16 +1155,16 @@ export class VSModelSwitchApp implements vscode.Disposable {
 
   private async openMenu(): Promise<void> {
     const items: MenuItem[] = [
-      { label: 'Switch Provider', action: 'switchProvider' },
-      { label: 'Add Provider', action: 'addProvider' },
-      { label: 'Open Claude Terminal', action: 'openClaudeTerminal' },
-      { label: 'Open Codex Terminal', action: 'openCodexTerminal' },
-      { label: 'View Claude Config', action: 'viewClaudeConfig' },
-      { label: 'View Codex Config', action: 'viewCodexConfig' },
-      { label: 'Export Public Config', action: 'exportPublicConfig' },
-      { label: 'Import Public Config', action: 'importPublicConfig' }
+      { label: '切换供应商', action: 'switchProvider' },
+      { label: '添加供应商', action: 'addProvider' },
+      { label: '打开 Claude 终端', action: 'openClaudeTerminal' },
+      { label: '打开 Codex 终端', action: 'openCodexTerminal' },
+      { label: '查看 Claude 配置', action: 'viewClaudeConfig' },
+      { label: '查看 Codex 配置', action: 'viewCodexConfig' },
+      { label: '导出供应商配置', action: 'exportPublicConfig' },
+      { label: '导入供应商配置', action: 'importPublicConfig' }
     ];
-    const action = await vscode.window.showQuickPick(items, { placeHolder: 'VSCodeModelSwitch' });
+    const action = await vscode.window.showQuickPick(items, { placeHolder: 'AgentDeck' });
     if (!action) {
       return;
     }
@@ -930,15 +1187,15 @@ export class VSModelSwitchApp implements vscode.Disposable {
         { label: 'Claude Code', tool: 'claude' as ToolId },
         { label: 'Codex', tool: 'codex' as ToolId }
       ],
-      { title: 'Provider Type' }
+      { title: '选择工具' }
     );
     if (!toolPick) {
       return;
     }
 
-    const name = await this.promptRequiredInput('Provider Name', 'OpenRouter, DeepSeek, Work Proxy');
-    const baseUrl = await this.promptRequiredInput(`${toolPick.label} Base URL`, 'https://api.example.com');
-    const key = await this.promptRequiredInput(`${toolPick.label} API Key`, 'sk-...', true);
+    const name = await this.promptRequiredInput('供应商名称', 'OpenRouter, DeepSeek, Work Proxy');
+    const baseUrl = await this.promptRequiredInput(`${toolPick.label} API 地址`, 'https://api.example.com');
+    const key = await this.promptRequiredInput(`${toolPick.label} API 密钥`, 'sk-...', true);
     if (!name || !baseUrl || !key) {
       return;
     }
@@ -962,8 +1219,12 @@ export class VSModelSwitchApp implements vscode.Disposable {
 
   private async createProvider(input: CreateProviderInput): Promise<void> {
     this.ensureToolEnabled(input.tool);
+    if (input.tool === 'codex') {
+      const group = this.codexOrganization.requireGroup(input.groupId ?? INDEPENDENT_GROUP);
+      if (input.applyNow && this.codexOrganization.localState().disabledGroups.includes(group.id)) throw new Error('目标群组已禁用，允许保存新供应商，但不能同时应用。');
+    }
     if (!input.name.trim()) {
-      throw new Error('Provider name is required');
+      throw new Error('请填写供应商名称。');
     }
     const configMode = input.configMode ?? 'generated';
     const codexMode = input.tool === 'codex' ? (input.codexMode ?? 'api') : undefined;
@@ -972,9 +1233,14 @@ export class VSModelSwitchApp implements vscode.Disposable {
     if (!(input.tool === 'codex' && codexMode === 'official')) validateConfigText(input.tool, configText);
     const values = codexMode === 'official' ? { baseUrl: '', model: '', key: '' } : extractConfigValues(input.tool, configText);
     const key = input.key.trim() || values.key;
-    if (codexMode !== 'official' && !values.baseUrl) throw new Error('Base URL is required');
-    if (codexMode !== 'official' && !key) throw new Error('Unable to identify API key; enter it again');
+    if (codexMode !== 'official' && !values.baseUrl) throw new Error('请填写 API 地址。');
+    if (codexMode !== 'official' && !key) throw new Error('无法识别 API 密钥，请重新填写。');
     if (codexMode !== 'official') await this.validateProviderUniqueness(input.tool, input.name, values.baseUrl, key);
+    const confirmed = input.applyNow && input.tool === 'codex';
+    if (confirmed) {
+      await this.sessionController.ensureMode(codexMode ?? 'api');
+      if (!await this.sessionController.confirmChange('保存并应用 Codex API Provider')) throw new Error('已取消：Provider 未保存或应用。');
+    }
 
     const id = createId(slugify(`${input.tool}-${input.name}`));
     const secretRef = SecretStore.ref(id, input.tool);
@@ -1004,16 +1270,20 @@ export class VSModelSwitchApp implements vscode.Disposable {
     }
 
     await this.store.upsertProvider(provider);
+    if (input.tool === 'codex' && codexMode !== 'official') {
+      try { await this.codexOrganization.assignNewProvider(provider.id, input.groupId); }
+      catch (error) { await this.store.deleteProvider(provider.id); await this.secretStore.delete(secretRef); throw error; }
+    }
     if (!values.model && codexMode !== 'official') {
-      void vscode.window.showWarningMessage(`${input.name.trim()} was saved without a model. Configure a model before using Verify Model.`);
+      void vscode.window.showWarningMessage(`${input.name.trim()} 已保存，但尚未设置模型。请先选择模型，再执行模型验证。`);
     }
 
     if (input.applyNow) {
       const previousProviderId = this.store.getCurrentProviderId(input.tool);
       await this.store.setCurrentProviderId(input.tool, provider.id);
       try {
-        const result = await this.applyProvider(input.tool);
-        if (result?.missingSecrets.length) throw new Error('Unable to identify API key; enter it again');
+        const result = await this.applyProvider(input.tool, confirmed);
+        if (result?.missingSecrets.length) throw new Error('无法识别 API 密钥，请重新填写。');
       } catch (error) {
         await this.store.setCurrentProviderId(input.tool, previousProviderId);
         throw error;
@@ -1030,15 +1300,15 @@ export class VSModelSwitchApp implements vscode.Disposable {
         { label: 'Claude Code', tool: 'claude' as ToolId },
         { label: 'Codex', tool: 'codex' as ToolId }
       ],
-      { title: 'Switch Tool Provider' }
+      { title: '选择要切换供应商的工具' }
     );
     if (!toolPick) {
       return;
     }
 
-    const providers = this.store.getProvidersByTool(toolPick.tool);
+    const providers = this.store.getProvidersByTool(toolPick.tool).filter(p => this.providerIsEnabled(p));
     if (providers.length === 0) {
-      void vscode.window.showInformationMessage(`No ${toolPick.label} providers yet. Add one first.`);
+      void vscode.window.showInformationMessage(`尚未添加 ${toolPick.label} 供应商，请先添加。`);
       return;
     }
 
@@ -1047,17 +1317,17 @@ export class VSModelSwitchApp implements vscode.Disposable {
       providers.map((provider) => ({
         label: provider.name,
         description: labelModel(provider.modelPolicy),
-        detail: provider.id === currentId ? 'current' : provider.baseUrl,
+        detail: provider.id === currentId ? '当前使用' : provider.baseUrl,
         provider
       })),
-      { title: `Switch ${toolPick.label} Provider` }
+      { title: `切换 ${toolPick.label} 供应商` }
     );
     if (!selected) {
       return;
     }
 
     await this.activateProvider(selected.provider);
-    void vscode.window.showInformationMessage(`${toolPick.label} provider applied. Restart existing clients to use it.`);
+    void vscode.window.showInformationMessage(`${toolPick.label} 供应商已应用，请重新打开已有客户端以使用新配置。`);
   }
 
   private async applyProviderWithMessage(tool: ToolId): Promise<void> {
@@ -1067,23 +1337,28 @@ export class VSModelSwitchApp implements vscode.Disposable {
     }
 
     if (result.missingSecrets.length > 0) {
-      void vscode.window.showWarningMessage(`Provider applied with missing keys: ${result.missingSecrets.join(', ')}`);
+      void vscode.window.showWarningMessage(`配置已写入，但缺少以下密钥：${result.missingSecrets.join(', ')}`);
       return;
     }
     if (result.degraded.length > 0) {
-      void vscode.window.showWarningMessage(`Provider applied with issues: ${result.degraded.join('; ')}`);
+      void vscode.window.showWarningMessage(`配置已写入，但有以下问题：${result.degraded.join('; ')}`);
       return;
     }
-    void vscode.window.showInformationMessage(`${labelTool(tool)} provider applied to new terminals and CLI config.`);
+    void vscode.window.showInformationMessage(`已应用 ${labelTool(tool)} 供应商配置；已有客户端可能需要重新打开。`);
   }
 
-  private async applyProvider(tool: ToolId): Promise<ResolvedProvider | undefined> {
+  private async applyProvider(tool: ToolId, confirmed = false): Promise<ResolvedProvider | undefined> {
     this.ensureToolEnabled(tool);
     const provider = this.store.getCurrentProvider(tool);
+    if (provider) this.ensureProviderEnabled(provider);
+    if (tool === 'codex' && provider) {
+      await this.sessionController.ensureMode(provider.codexMode ?? 'api');
+      if (!confirmed && !await this.sessionController.confirmChange('应用 Codex API Provider')) throw new Error('已取消，配置未更改。');
+    }
     if (!provider) {
       this.status = { kind: 'off' };
       this.refreshStatus();
-      void vscode.window.showInformationMessage(`No active ${labelTool(tool)} provider.`);
+      void vscode.window.showInformationMessage(`${labelTool(tool)} 当前没有使用中的供应商。`);
       return undefined;
     }
 
@@ -1108,21 +1383,21 @@ export class VSModelSwitchApp implements vscode.Disposable {
       resolved.codex = { providerId: provider.id, providerName: provider.name, ...endpoint!, model: value.model, codexProviderId: 'OpenAI', wireApi: 'responses', configText: useProxy ? proxyClientConfig(value.configText, endpoint!, tool) : value.configText, mode: provider.codexMode ?? 'api', proxy: useProxy };
     }
 
-    const previousRevisions = this.context.workspaceState.get<Record<string, string>>('vscodemodelswitch.appliedRevisions', {});
+    const previousRevisions = this.environment.get<Record<string, string>>('vscodemodelswitch.appliedRevisions', {});
     const proxyRecordKey = tool === 'claude' ? 'vscodemodelswitch.appliedProxy' : 'vscodemodelswitch.appliedCodexProxy';
-    const previousProxyRecord = this.context.workspaceState.get<AppliedProxyRecord>(proxyRecordKey);
+    const previousProxyRecord = this.context.workspaceState.get<AppliedProxyRecord>(this.environment.key(proxyRecordKey));
     let appliedKeyRef: string | undefined;
     let previousAppliedKey: string | undefined;
     try {
       // Finish fallible metadata/key storage before changing the user's config file.
       if (!resolved.missingSecrets.length) {
         if (useProxy) {
-          appliedKeyRef = SecretStore.ref(provider.id, tool) + '.applied';
+          appliedKeyRef = this.environment.key(SecretStore.ref(provider.id, tool) + '.applied');
           previousAppliedKey = await this.secretStore.get(appliedKeyRef);
           await this.secretStore.store(appliedKeyRef, value!.key);
-          await this.context.workspaceState.update(proxyRecordKey, { provider: structuredClone(provider), port: this.proxyServer.getPort(), localUrl: endpoint!.baseUrl, keyRef: appliedKeyRef });
-        } else await this.context.workspaceState.update(proxyRecordKey, undefined);
-        await this.context.workspaceState.update('vscodemodelswitch.appliedRevisions', { ...previousRevisions, [provider.id]: provider.updatedAt });
+          await this.context.workspaceState.update(this.environment.key(proxyRecordKey), { provider: structuredClone(provider), port: this.proxyServer.getPort(), localUrl: endpoint!.baseUrl, keyRef: appliedKeyRef });
+        } else await this.context.workspaceState.update(this.environment.key(proxyRecordKey), undefined);
+        await this.environment.update('vscodemodelswitch.appliedRevisions', { ...previousRevisions, [provider.id]: provider.updatedAt });
       }
       if (resolved.missingSecrets.length === 0 && vscode.workspace.getConfiguration('vscodemodelswitch').get<boolean>('globalCliSync', true)) {
         if (tool === 'claude') await this.claudeAdapter.apply(resolved);
@@ -1131,8 +1406,8 @@ export class VSModelSwitchApp implements vscode.Disposable {
     } catch (error) {
       rollback?.();
       try {
-        await this.context.workspaceState.update('vscodemodelswitch.appliedRevisions', previousRevisions);
-        await this.context.workspaceState.update(proxyRecordKey, previousProxyRecord);
+        await this.environment.update('vscodemodelswitch.appliedRevisions', previousRevisions);
+        await this.context.workspaceState.update(this.environment.key(proxyRecordKey), previousProxyRecord);
         if (appliedKeyRef) {
           if (previousAppliedKey === undefined) await this.secretStore.delete(appliedKeyRef);
           else await this.secretStore.store(appliedKeyRef, previousAppliedKey);
@@ -1155,12 +1430,18 @@ export class VSModelSwitchApp implements vscode.Disposable {
     return resolved;
   }
 
-  private async activateProvider(provider: ProviderProfile): Promise<void> {
+  private async activateProvider(provider: ProviderProfile, confirmed = false): Promise<void> {
+    this.ensureProviderEnabled(provider);
+    if (provider.tool === 'codex' && !confirmed) {
+      await this.sessionController.ensureMode(provider.codexMode ?? 'api');
+      if (!await this.sessionController.confirmChange('应用 Codex API Provider')) throw new Error('已取消：当前 Provider 未更改。');
+      confirmed = true;
+    }
     const previous = this.store.getCurrentProviderId(provider.tool);
     await this.store.setCurrentProviderId(provider.tool, provider.id);
     try {
-      const result = await this.applyProvider(provider.tool);
-      if (result?.missingSecrets.length) throw new Error('Unable to identify API key; enter it again');
+      const result = await this.applyProvider(provider.tool, confirmed);
+      if (result?.missingSecrets.length) throw new Error('无法识别 API 密钥，请重新填写。');
     } catch (error) {
       await this.store.setCurrentProviderId(provider.tool, previous);
       await this.scanCurrentProvidersFromConfig(); this.refreshStatus();
@@ -1171,13 +1452,20 @@ export class VSModelSwitchApp implements vscode.Disposable {
   private async restoreAppliedProxy(): Promise<void> {
     const synced = vscode.workspace.getConfiguration('vscodemodelswitch').get<boolean>('globalCliSync', true);
     for (const tool of ['claude', 'codex'] as ToolId[]) {
+      if (tool === 'codex' && this.sessionController.recoveryBlocked) continue;
       const recordKey = tool === 'claude' ? 'vscodemodelswitch.appliedProxy' : 'vscodemodelswitch.appliedCodexProxy';
-      const record = this.context.workspaceState.get<AppliedProxyRecord>(recordKey);
-      if (!record || record.provider.tool !== tool || !this.store.getProvider(record.provider.id)) continue;
+      const record = structuredClone(this.context.workspaceState.get<AppliedProxyRecord>(this.environment.key(recordKey)) ?? this.context.workspaceState.get<AppliedProxyRecord>(recordKey));
+      if (!record || (!synced && !this.context.workspaceState.get(this.environment.key(recordKey))) || record.provider.tool !== tool || !this.store.getProvider(record.provider.id)) continue;
       const current = await (tool === 'claude' ? this.claudeAdapter : this.codexAdapter).readActiveConfig().catch(() => ({} as { baseUrl?: string; key?: string }));
       if (synced && (current.baseUrl !== record.localUrl || managedProxyId(current.baseUrl, current.key) !== record.provider.id)) continue;
       try {
         const key = await this.secretStore.get(record.keyRef);
+        if (key && !record.keyRef.startsWith(this.environment.key(''))) {
+          const migratedRef = this.environment.key(SecretStore.ref(record.provider.id, tool) + '.applied');
+          await this.secretStore.store(migratedRef, key);
+          record.keyRef = migratedRef;
+          await this.context.workspaceState.update(this.environment.key(recordKey), record);
+        }
         if (!key) throw new Error('Applied proxy key is missing; Apply this provider again');
         const model = record.provider.modelPolicy.type === 'fixed' || record.provider.modelPolicy.type === 'custom' ? record.provider.modelPolicy.model : undefined;
         await this.proxyServer.start(record.port);
@@ -1200,12 +1488,17 @@ export class VSModelSwitchApp implements vscode.Disposable {
   async controlProxyFromSidebar(providerId: string, action: 'start' | 'stop' | 'restart' | 'log'): Promise<void> {
     const provider = this.store.getProvider(providerId);
     if (!provider || provider.codexMode === 'official') throw new Error('API provider not found');
+    this.ensureProviderEnabled(provider);
     if (action === 'log') { this.outputChannel.show(); return; }
+    const canResume = this.proxyServer.runtime(providerId).localUrl;
+    // Resuming/stopping an existing route also affects live client requests.
+    // If Apply is needed it owns the confirmation, so this never asks twice.
+    if (provider.tool === 'codex' && (action === 'stop' || canResume) && !await this.sessionController.confirmChange('更改当前 API Provider 的协议转换代理')) throw new Error('已取消：代理状态未更改。');
     if (action === 'stop' || action === 'restart') this.proxyServer.stopRoute(providerId);
     if (action === 'start' || action === 'restart') {
       if (!this.proxyServer.resumeRoute(providerId)) {
         if (this.appliedRevisions.has(providerId) && this.appliedRevisions.get(providerId) !== provider.updatedAt) throw new Error('Apply pending changes before starting this proxy');
-        await this.activateProvider(provider);
+        await this.activateProvider(provider, provider.tool === 'codex' && Boolean(canResume));
       }
       delete this.toolFailures[provider.tool];
     }
@@ -1239,6 +1532,7 @@ export class VSModelSwitchApp implements vscode.Disposable {
         continue;
       }
 
+      this.ensureProviderEnabled(provider);
       const key = await this.secretStore.get(provider.secretRef);
       if (!key) {
         this.toolFailures[item] = 'API key missing';
@@ -1250,7 +1544,7 @@ export class VSModelSwitchApp implements vscode.Disposable {
         const models = await vscode.window.withProgress(
           {
             location: vscode.ProgressLocation.Notification,
-            title: `Refreshing ${labelTool(item)} models`,
+            title: `刷新 ${labelTool(item)} 模型列表`,
             cancellable: false
           },
           () => this.modelResolver.refresh(item, provider, key)
@@ -1268,21 +1562,20 @@ export class VSModelSwitchApp implements vscode.Disposable {
       this.status = { kind: 'degraded', detail: failed.join('; ') };
       await this.scanCurrentProvidersFromConfig();
       this.refreshStatus();
-      void vscode.window.showWarningMessage(`Model refresh finished with issues: ${failed.join('; ')}`);
+      throw new Error(`模型刷新失败：${failed.join('; ')}`);
     } else {
       this.status = { kind: 'ready' };
       await this.scanCurrentProvidersFromConfig();
       this.refreshStatus();
-      void vscode.window.showInformationMessage(`Model refresh complete: ${refreshed.join(', ') || 'no active providers'}`);
     }
   }
 
   private async updateProviderModel(providerId: string): Promise<void> {
     const provider = this.store.getProvider(providerId);
     if (!provider) {
-      throw new Error('Provider not found');
+      throw new Error('未找到供应商。');
     }
-    this.ensureToolEnabled(provider.tool);
+    this.ensureProviderEnabled(provider);
 
     const key = await this.secretStore.get(provider.secretRef);
     if (!key) {
@@ -1292,10 +1585,13 @@ export class VSModelSwitchApp implements vscode.Disposable {
     if (provider.codexMode === 'official') throw new Error('Official Codex mode has no API model endpoint');
     const models = await this.fetchAndCacheModels(provider.tool, provider.baseUrl, key, provider.proxy);
     const model = await this.pickModel(provider.tool, models);
-    if (!model) {
-      return;
-    }
+    if (!model) throw new Error('已取消：模型未更改。');
 
+    const appliesNow = this.store.getCurrentProviderId(provider.tool) === provider.id;
+    if (appliesNow && provider.tool === 'codex') {
+      await this.sessionController.ensureMode(provider.codexMode ?? 'api');
+      if (!await this.sessionController.confirmChange('修改并应用当前 Codex 模型')) throw new Error('已取消：模型未更改。');
+    }
     await this.store.updateProvider(provider.id, (current) => ({
       ...current,
       modelPolicy: {
@@ -1307,135 +1603,156 @@ export class VSModelSwitchApp implements vscode.Disposable {
     }));
     this.clearProviderDiagnostics(provider.id);
 
-    if (this.store.getCurrentProviderId(provider.tool) === provider.id) {
-      await this.applyProvider(provider.tool);
+    if (appliesNow) {
+      try { await this.applyProvider(provider.tool, provider.tool === 'codex'); }
+      catch (error) { await this.store.upsertProvider(provider); this.refreshStatus(); throw error; }
     } else {
       this.refreshStatus();
     }
   }
 
   private async openClaudeTerminal(): Promise<void> {
-    const resolved = await this.applyProvider('claude');
-    if (!resolved?.claude) {
-      void vscode.window.showWarningMessage('Claude Code provider is not configured.');
-      return;
-    }
-    this.terminalManager.openClaude({ ...this.lastEnv, ...this.networkProxy.environment('claude') });
+    const env = Object.fromEntries(Object.entries(this.lastEnv).filter(([name]) => !name.startsWith('OPENAI_')));
+    this.terminalManager.openClaude({ ...env, ...this.networkProxy.environment('claude') });
   }
 
   private async openCodexTerminal(): Promise<void> {
-    if (await this.codexAdapter.readMode() === 'official') {
-      this.terminalManager.openCodex({ ...this.lastEnv, ...this.networkProxy.environment('codex') });
-      return;
-    }
-    const resolved = await this.applyProvider('codex');
-    if (!resolved?.codex) {
-      void vscode.window.showWarningMessage('Codex provider is not configured.');
-      return;
-    }
-    this.terminalManager.openCodex({ ...this.lastEnv, ...this.networkProxy.environment('codex') });
+    this.sessionController.assertReady();
+    const env = Object.fromEntries(Object.entries(this.lastEnv).filter(([key]) => key.startsWith('OPENAI_')));
+    this.terminalManager.openCodex({ ...env, ...this.networkProxy.environment('codex') });
   }
 
   private async viewConfig(tool: ToolId): Promise<void> {
-    const filePath = tool === 'claude' ? this.claudeAdapter.getConfigPath() : this.codexAdapter.getConfigPath();
-    if (!(await pathExists(filePath))) {
-      void vscode.window.showWarningMessage(`${labelTool(tool)} config file does not exist yet: ${filePath}`);
-      return;
+    const files = tool === 'claude' ? [this.claudeAdapter.getConfigPath()] : [this.codexAdapter.getConfigPath()];
+    if (tool === 'codex' && (await this.codexAdapter.readMode()) === 'official') {
+      const selected = await vscode.window.showQuickPick([
+        { label: 'config.toml · 客户端配置', files },
+        { label: 'auth.json · 敏感认证缓存', files: [this.codexAdapter.getAuthPath()] },
+        { label: '同时打开配置与认证缓存', files: [...files, this.codexAdapter.getAuthPath()] }
+      ], { title: '打开当前环境文件（认证文件包含敏感信息）' });
+      if (!selected) throw new Error('已取消：未打开配置。');
+      files.splice(0, files.length, ...selected.files);
     }
-
-    const document = await vscode.workspace.openTextDocument(vscode.Uri.file(filePath));
-    await vscode.window.showTextDocument(document, { preview: true });
+    for (const file of files) {
+      if (!await pathExists(file)) { void vscode.window.showInformationMessage('文件尚未创建：' + file); continue; }
+      const document = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
+      await vscode.window.showTextDocument(document, { preview: false });
+    }
+  }
+  private async manageHistoryBackups(remove: boolean): Promise<void> {
+    const root = (await this.sessionController.state()).root;
+    if (!root) throw new Error('请先连接数据目录。');
+    const parent = join(root, 'backups'), backups = await historyBackups(parent);
+    if (!backups.length) throw new Error('尚无历史备份。');
+    const choices = backups.map(backup => ({ label: backup.name, description: backup.createdAt + ' · ' + (backup.bytes / 1048576).toFixed(2) + ' MiB · ' + (backup.complete ? '完整快照' : '未完成'), detail: backup.directory, backup }));
+    if (remove) {
+      const selected = await vscode.window.showQuickPick(choices, { title: '选择要删除的历史备份', canPickMany: true });
+      if (!selected?.length) throw new Error('已取消：未删除备份。');
+      const answer = await vscode.window.showWarningMessage('删除以下 ' + selected.length + ' 份历史备份？活动聊天历史不变。\n' + selected.map(x => x.label + ' · ' + x.description).join('\n'), { modal: true }, { title: '删除所选备份' }, { title: '取消', isCloseAffordance: true });
+      if (answer?.title !== '删除所选备份') throw new Error('已取消：未删除备份。');
+      for (const item of selected) await removeHistoryBackup(parent, item.backup);
+    } else {
+      const selected = await vscode.window.showQuickPick(choices, { title: '浏览历史备份' });
+      if (!selected || !await browseFiles(selected.backup.directory, '浏览历史备份')) throw new Error('已取消：未打开备份。');
+    }
   }
 
-  private async exportPublicConfig(): Promise<void> {
-    const uri = await vscode.window.showSaveDialog({
-      title: 'Export Public Config',
-      filters: { JSON: ['json'] },
-      saveLabel: 'Export'
-    });
-    if (!uri) {
-      return;
-    }
+  private codexPublicConfig(): PublicConfigFile {
+    return { version: 2, organizations: { codex: this.codexOrganization?.read() ?? emptyOrganization() }, providers: this.store.getProvidersByTool('codex').filter(p => p.codexMode !== 'official').map(p => ({ ...p, baseUrl: publicEndpoint(p.baseUrl), configText: p.configText ? redactConfigText('codex', p.configText) : p.configText })) };
+  }
+  private async exportCodexProviders(): Promise<void> {
+    const state = await this.sessionController.state();
+    if (!state.root || state.legacy) throw new Error('请先连接数据目录。');
+    const directory = join(state.root, 'providers'); await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+    const file = join(directory, 'codex-public-' + new Date().toISOString().replace(/[:.]/g, '-') + '.json');
+    await fs.writeFile(file, JSON.stringify(this.codexPublicConfig(), null, 2) + '\n', { flag: 'wx', mode: 0o600 });
+  }
 
-    const config: PublicConfigFile = {
+  private async exportPublicConfig(tool?: ToolId): Promise<void> {
+    const uri = await vscode.window.showSaveDialog({
+      title: tool === 'codex' ? '另存为供应商配置' : '导出供应商配置',
+      filters: { JSON: ['json'] },
+      saveLabel: '导出'
+    });
+    if (!uri) throw new Error('已取消：文件操作未执行。');
+
+    const config: PublicConfigFile = tool === 'codex' ? this.codexPublicConfig() : tool === 'claude' ? { version: 1, providers: this.store.getProvidersByTool('claude').map(p => ({ ...p, configText: p.configText ? redactConfigText('claude', p.configText) : p.configText })) } : {
       version: 1,
       currentProviderIds: this.store.getCurrentProviderIds(),
       providers: this.store.getProviders()
     };
     await fs.writeFile(uri.fsPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
-    void vscode.window.showInformationMessage('Public config exported without API keys.');
+    void vscode.window.showInformationMessage('供应商配置已导出，不包含已保存的 API 密钥。');
   }
 
-  private async importPublicConfig(): Promise<void> {
+  private async importPublicConfig(tool?: ToolId): Promise<void> {
     const uris = await vscode.window.showOpenDialog({
-      title: 'Import Public Config',
+      title: '导入供应商配置',
       canSelectMany: false,
       filters: { JSON: ['json'] },
-      openLabel: 'Import'
+      openLabel: '导入'
     });
     const uri = uris?.[0];
-    if (!uri) {
-      return;
-    }
+    if (!uri) throw new Error('已取消：文件操作未执行。');
 
     const parsed = JSON.parse(await fs.readFile(uri.fsPath, 'utf8')) as PublicConfigFile;
-    if (parsed.version !== 1 || !Array.isArray(parsed.providers)) {
-      throw new Error('Unsupported config file');
+    if (![1, 2].includes(parsed.version) || !Array.isArray(parsed.providers)) {
+      throw new Error('不支持的配置文件。');
     }
 
     const mode = await vscode.window.showQuickPick(
       [
-        { label: 'Merge', description: 'Keep existing providers and add imported providers', value: 'merge' },
-        { label: 'Replace', description: 'Replace all local provider metadata', value: 'replace' }
+        { label: '合并', description: '保留现有供应商并添加导入的供应商', value: 'merge' },
+        { label: '替换', description: '替换当前工具范围内的供应商定义', value: 'replace' }
       ],
-      { title: 'Import Strategy' }
+      { title: '选择导入方式' }
     );
-    if (!mode) {
-      return;
-    }
+    if (!mode) throw new Error('已取消：未导入配置。');
 
-    const imported = parsed.providers.map((provider) => ({
+    const imported = parsed.providers.filter(provider => !tool || provider.tool === tool).map((provider) => ({
       ...provider,
+      secretRef: this.store.getProvider(provider.id)?.tool === provider.tool ? this.store.getProvider(provider.id)!.secretRef : SecretStore.ref(provider.id, provider.tool),
       name: provider.name.trim(),
+      configText: provider.configText ? redactConfigText(provider.tool, provider.configText) : provider.configText,
       baseUrl: normalizeBaseUrl(provider.baseUrl),
       proxy: normalizeProxyConfig(provider.proxy, provider.tool)
     }));
+    const previousProviders = this.store.getProviders();
+    let providers: ProviderProfile[];
     if (mode.value === 'replace') {
-      validateImportedNames(imported);
-      await this.store.saveProviders(imported);
+      for (const provider of imported) if (tool && previousProviders.some(p => p.id === provider.id && p.tool !== tool)) throw new Error('导入 ID 与另一客户端供应商冲突。');
+      providers = tool ? [...previousProviders.filter(p => p.tool !== tool), ...imported] : imported;
     } else {
-      const providers = this.store.getProviders();
+      providers = [...previousProviders];
       for (const provider of imported) {
-        const index = providers.findIndex((item) => item.id === provider.id);
-        if (index >= 0) {
-          providers[index] = provider;
-        } else {
-          providers.push(provider);
-        }
+        const index = providers.findIndex(p => p.id === provider.id);
+        if (index >= 0 && providers[index].tool !== provider.tool) throw new Error('导入 ID 与另一客户端供应商冲突。');
+        if (index >= 0) providers[index] = provider; else providers.push(provider);
       }
-      validateImportedNames(providers);
+    }
+    validateImportedNames(providers);
+    const previousOrganization = this.codexOrganization?.read() ?? emptyOrganization();
+    const nextOrganization = tool !== 'claude' ? importOrganization(previousOrganization, parsed.version === 2 ? parsed.organizations?.codex : undefined, mode.value as 'merge' | 'replace', imported.filter(p => p.tool === 'codex').map(p => p.id), providers.filter(p => p.tool === 'codex').map(p => p.id), 'codex') : undefined;
+    try {
       await this.store.saveProviders(providers);
+      if (nextOrganization) await this.codexOrganization.save(nextOrganization);
+    } catch (error) {
+      try { await this.store.saveProviders(previousProviders); if (nextOrganization) await this.codexOrganization.save(previousOrganization); }
+      catch { throw new Error('供应商导入失败，定义恢复未完成；请保留原导出文件并检查存储状态。'); }
+      throw error;
     }
-
-    if (parsed.currentProviderIds) {
-      if (parsed.currentProviderIds.claude) {
-        await this.store.setCurrentProviderId('claude', parsed.currentProviderIds.claude);
-      }
-      if (parsed.currentProviderIds.codex) {
-        await this.store.setCurrentProviderId('codex', parsed.currentProviderIds.codex);
-      }
-    }
+    // Current selections, disabled states and all CLI files are intentionally untouched.
 
     this.status = { kind: 'missingKey', detail: 'Imported provider metadata does not include API keys.' };
     this.refreshStatus();
-    void vscode.window.showInformationMessage('Public config imported. API keys must be entered on this machine.');
+    void vscode.window.showInformationMessage('供应商配置已导入，请在当前环境补充 API 密钥。');
   }
 
   private async fetchAndCacheModels(tool: ToolId, baseUrl: string, key: string, proxy?: ProxyConfig): Promise<ModelInfo[]> {
     return vscode.window.withProgress(
       {
         location: vscode.ProgressLocation.Notification,
-        title: `Fetching ${labelTool(tool)} models`,
+        title: `获取 ${labelTool(tool)} 模型列表`,
         cancellable: true
       },
       async (_progress, token) => {
@@ -1468,7 +1785,7 @@ export class VSModelSwitchApp implements vscode.Disposable {
 
   private async pickModel(tool: ToolId, models: ModelInfo[]): Promise<string | undefined> {
     if (models.length === 0) {
-      void vscode.window.showWarningMessage(`${labelTool(tool)} model list is empty.`);
+      void vscode.window.showWarningMessage(`${labelTool(tool)} 返回的模型列表为空。`);
       return undefined;
     }
 
@@ -1478,7 +1795,7 @@ export class VSModelSwitchApp implements vscode.Disposable {
         description: model.displayName,
         model
       })),
-      { title: `Select ${labelTool(tool)} Model` }
+      { title: `选择 ${labelTool(tool)} 模型` }
     );
     return selected?.model.id;
   }
@@ -1489,12 +1806,12 @@ export class VSModelSwitchApp implements vscode.Disposable {
       placeHolder,
       password,
       ignoreFocusOut: true,
-      validateInput: (value) => (value.trim() ? undefined : 'Required')
+      validateInput: (value) => (value.trim() ? undefined : '此项必填')
     });
   }
 
   private ensureToolEnabled(tool: ToolId): void {
-    if (!this.store.getToolEnabled(tool)) throw new Error(`${labelTool(tool)} is turned off`);
+    if (!this.store.getToolEnabled(tool)) throw new Error(`${labelTool(tool)} 配置管理已停用`);
   }
 }
 
@@ -1556,15 +1873,21 @@ function normalizeBaseUrl(value: string): string {
   return value.trim().replace(/\/+$/g, '').replace(/\/v1$/i, '');
 }
 
-function normalizeProviderName(value: string): string {
-  return value.trim().toLocaleLowerCase();
-}
+function normalizeProviderName(name: string): string { return normalizedName(name); }
 
 function validateImportedNames(providers: ProviderProfile[]): void {
   const seen = new Set<string>();
   for (const provider of providers) {
+    if (!provider || !['codex', 'claude'].includes(provider.tool) || typeof provider.id !== 'string' || !/^[a-zA-Z0-9_-]+$/.test(provider.id) || typeof provider.name !== 'string' || !provider.name.trim()) throw new Error('供应商名称、ID 或客户端类型无效。');
     const key = `${provider.tool}:${normalizeProviderName(provider.name)}`;
-    if (seen.has(key)) throw new Error(`Duplicate imported provider name: ${provider.name}`);
+    if (seen.has(key)) throw new Error(`导入的供应商名称重复：${provider.name}`);
     seen.add(key);
   }
+}
+
+// Portable exports deliberately omit opaque templates, custom headers and usage
+// URLs: those fields may embed credentials outside the standard key slot.
+function publicEndpoint(value: string): string {
+  try { const url = new URL(value); url.username = ''; url.password = ''; url.search = ''; url.hash = ''; return url.toString(); }
+  catch { return ''; }
 }

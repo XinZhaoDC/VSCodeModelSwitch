@@ -1,4 +1,4 @@
-import { networkFetch } from '../network/transport';
+import { withNetworkTool, networkFetch } from '../network/transport';
 import { randomUUID } from 'crypto';
 import * as http from 'http';
 import { ProxyConfig, ProxyOptions, ProxyRuntime, ToolId } from '../types';
@@ -170,7 +170,7 @@ export class ProxyServer {
             break;
           }
           if (iteration === route.options.maxWebIterations) throw new UpstreamError('Web tool iteration limit reached');
-          const results = await Promise.all(calls.map(async (call: Json) => ({ call, blocks: await executeWebTool(call.name, call.input, route.options, controller.signal) })));
+          const results = await Promise.all(calls.map(async (call: Json) => ({ call, blocks: await withNetworkTool(route.tool, () => executeWebTool(call.name, call.input, route.options, controller.signal)) })));
           if (nativeResponses) payload = { ...payload, input: [...payload.input, ...message.output, ...results.map(({ call, blocks }: Json) => ({ type: 'function_call_output', call_id: call.id,
             output: blocks.some((block: Json) => block.type === 'image') ? blocks.map((block: Json) => block.type === 'image'
               ? { type: 'input_image', image_url: block.source.type === 'base64' ? `data:${block.source.media_type};base64,${block.source.data}` : block.source.url }
@@ -227,7 +227,7 @@ export class ProxyServer {
       if (signal.aborted) throw new Error('Request cancelled');
       if (attempt) stats.retries++;
       try {
-        response = await networkFetch(upstreamUrl(route.baseUrl, route.options.messagesPath), { method: 'POST', headers: { ...this.headers(route), 'content-length': String(Buffer.byteLength(body)) }, body, signal, redirect: 'manual' });
+        response = await networkFetch(upstreamUrl(route.baseUrl, route.options.messagesPath), { method: 'POST', headers: { ...this.headers(route), 'content-length': String(Buffer.byteLength(body)) }, body, signal, redirect: 'manual' }, route.tool);
         if (response.ok && response.headers.get('content-type')?.includes('text/event-stream')) break;
         const status = response.status;
         await response.body?.cancel();
@@ -271,7 +271,7 @@ export class ProxyServer {
       if (signal.aborted) throw new Error('Request cancelled');
       if (attempt) stats.retries++;
       try {
-        const reply = await requestHttp(upstreamUrl(route.baseUrl, route.options.messagesPath), 'POST', this.headers(route), Buffer.from(JSON.stringify(payload)), signal);
+        const reply = await withNetworkTool(route.tool, () => requestHttp(upstreamUrl(route.baseUrl, route.options.messagesPath), 'POST', this.headers(route), Buffer.from(JSON.stringify(payload)), signal));
         let data: Json;
         try { data = route.config.apiFormat === 'responses' ? decodeResponsesBody(reply.body.toString('utf8'), String(reply.headers['content-type']).includes('text/event-stream')) : JSON.parse(reply.body.toString('utf8')); }
         catch (error) { data = { error: { message: error instanceof Error ? error.message : 'Upstream returned invalid JSON' } }; }
@@ -295,7 +295,7 @@ export class ProxyServer {
     for (let attempt = 0; attempt < route.options.maxAttempts; attempt++) {
       if (attempt) stats.retries++;
       try {
-        const next = await networkFetch(upstreamUrl(route.baseUrl, route.options.messagesPath), { method: 'POST', headers: this.headers(route), body: JSON.stringify(payload), signal });
+        const next = await networkFetch(upstreamUrl(route.baseUrl, route.options.messagesPath), { method: 'POST', headers: this.headers(route), body: JSON.stringify(payload), signal }, route.tool);
         if (next.ok && next.body) { response = next; break; }
         const raw = await next.text();
         const retryable = [408, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524, 529].includes(next.status) || (next.status === 403 && !raw && route.config.preset === 'justdowork');

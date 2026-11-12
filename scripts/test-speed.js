@@ -11,7 +11,7 @@ const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const { SpeedMeasurement } = require('../out/speed/measurement');
 const { measureApi } = require('../out/speed/api');
-const { measureOfficialCodex } = require('../out/speed/codex');
+const { measureOfficialCodex } = require('../out/clients/codex/diagnostics/speed');
 const { runSpeedBenchmark } = require('../out/speed/runner');
 const { SpeedStore, speedResultStatus } = require('../out/speed/store');
 const { querySpeed } = require('../out/speed/query');
@@ -204,10 +204,10 @@ async function main() {
     });
     await test('sidebar emits both sample counts and read-only query actions', async () => {
       const actions = [];
-      const sidebar = new SidebarViewProvider({ fsPath: path.join(__dirname, '..') }, { speedTestFromSidebar: async (...args) => actions.push(args), copySpeedQuery: async () => actions.push('query'), getSidebarState: async () => ({}) });
+      const sidebar = new SidebarViewProvider({ fsPath: path.join(__dirname, '..') }, { recordOperation: async () => {}, speedTestFromSidebar: async (...args) => actions.push(args), copySpeedQuery: async () => actions.push('query'), getSidebarState: async () => ({ providers: [{ id: 'fixture', tool: 'codex', speedResult: { summary: { succeeded: 3, failed: 0, cancelled: 0 }, rounds: [] } }] }) });
       const html = sidebar.getHtml();
       const script = html.match(/<script[^>]*>([\s\S]*)<\/script>/)[1]; new vm.Script(script);
-      assert.match(html, /quickOfficialSpeedButton/); assert.match(html, /Standard Speed Test · Official/);
+      assert.match(html, /quickOfficialSpeedButton/); assert.match(html, /Test generation and speed/);
       assert.ok(!html.includes('copySpeedQueryButton'));
       await sidebar.handleMessage({ type: 'speedTest', providerId: 'fixture', runs: 3 });
       await sidebar.handleMessage({ type: 'copySpeedQuery' });
@@ -229,15 +229,15 @@ async function main() {
       screenshot.parameters.runs = 3;
       Object.assign(screenshot.summary, { comparable: true, succeeded: 3, failed: 0, cancelled: 0, ttftMedianMs: 3400, generationMedianTps: 33.28, endToEndMedianTps: 18.36 });
       const normal = format(screenshot);
-      for (const label of ['Output 33.28 tok/s', 'TTFT 3.40 s', 'Overall 18.36 tok/s', '3/3 passed', 'estimated', 'correct completed task', 'not live conversation monitoring']) assert.ok(normal.includes(label), label);
-      assert.equal(container.children.filter(node => node.className === 'diagnosticRow').length, 1);
+      for (const label of ['输出 33.28 tok/s', 'TTFT 3.40 s', '全程 18.36 tok/s', '3/3 passed', 'estimated', 'correct completed task', 'not live conversation monitoring']) assert.ok(normal.includes(label), label);
+      assert.equal(container.children.filter(node => node.className === 'diagnosticRow').length, 2);
       const details = container.children.find(node => node.tag === 'details'); assert.ok(!details.open);
       assert.ok(!visible().includes('correct completed task'));
       assert.ok(!html.includes('speedCards')); assert.ok(!html.includes('.speedValue'));
       details.children.find(node => node.tag === 'button').listeners.click(); assert.equal(actions[0].type, 'copySpeedQuery');
       context.busy = true; format(screenshot); assert.equal(container.children.at(-1).children.find(node => node.tag === 'button').disabled, true); context.busy = false;
       const buffered = structuredClone(report); buffered.summary.generationMedianTps = null; buffered.rounds[0].metrics.timingSource = 'buffered-proxy';
-      assert.match(format(buffered), /Output N\/A/); assert.match(visible(), /Buffered stream/);
+      assert.match(format(buffered), /输出 N\/A/); assert.match(visible(), /Buffered stream/);
       buffered.finishedAt = '2020-01-01T00:00:00Z'; format(buffered); assert.match(visible(), /Stale/);
       buffered.summary.comparable = false; format(buffered); assert.match(visible(), /Mixed conditions/);
       assert.ok(!visible().includes('33.28'));
@@ -251,8 +251,8 @@ async function main() {
       const network = { ok: true, reachable: true, latencyMs: 123, httpStatus: 200, modelsApi: 'available', modelCount: 42, endpoint: 'https://fixture.invalid/v1/models', resolvedAddresses: ['192.0.2.1'], checkedAt: '2026-10-23T08:00:00Z' };
       const usage = { ok: true, remaining: 0, used: 12.34, total: 12.34, unit: 'USD', checkedAt: network.checkedAt };
       render(container, network, usage, true, screenshot);
-      assert.deepEqual(container.children.filter(node => node.tag !== 'details').map(node => node.children[0].textContent), ['Network', 'Usage', 'Speed']);
-      assert.match(visible(), /Reachable/); assert.match(visible(), /123 ms/); assert.match(visible(), /Remaining 0 USD/);
+      assert.deepEqual(container.children.filter(node => node.tag !== 'details').map(node => node.children[0].textContent), ['Network', 'Usage', 'First round', 'Three-round summary']);
+      assert.match(visible(), /Reachable/); assert.match(visible(), /123 ms/); assert.match(visible(), /剩余 0 USD/);
       assert.ok(!visible().includes(network.endpoint)); assert.ok(!visible().includes('192.0.2.1')); assert.ok(text(container.children.at(-1)).includes(network.endpoint));
       assert.equal(container.children.filter(node => node.tag === 'details').length, 1);
       render(container, { ...network, ok: false, httpStatus: 401, modelsApi: 'httpError' }, { ...usage, ok: false, httpStatus: 403, error: 'fixture error' }, true);
@@ -270,7 +270,7 @@ async function main() {
       app.context = { extensionUri: { fsPath: path.join(__dirname, '..') } };
       try {
         const first = app.speedTestFromSidebar(provider.id, 1);
-        await assert.rejects(app.speedTestFromSidebar(provider.id, 1), /already running/);
+        await assert.rejects(app.speedTestFromSidebar(provider.id, 1), /已有生成测速正在运行/);
         await first;
         const result = (await app.speedStore.readAll())[0]; assert.equal(result.summary.succeeded, 1);
         if (buffered) { assert.equal(result.rounds[0].metrics.generationTps, null); assert.equal(result.connection.mode, 'built-in-proxy'); }

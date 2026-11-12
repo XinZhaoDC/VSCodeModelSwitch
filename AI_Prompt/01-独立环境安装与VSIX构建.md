@@ -5,7 +5,7 @@
 本项目是 Forest_Interface 中独立维护的 VS Code 扩展源码。源码位于：
 
 ```text
-/home/workspace/Forest_Interface/code/VSCodeModelSwitch
+/home/workspace/Forest_Interface/code/AgentDeck
 ```
 
 Node.js 运行时由 Forest_Interface 公共环境管理，固定 prefix 为：
@@ -26,8 +26,8 @@ Node.js 运行时由 Forest_Interface 公共环境管理，固定 prefix 为：
 ```text
 environment/profiles/vscodemodelswitch/       维护型 profile、入口和锁定信息
 environment/prefixes/vscodemodelswitch-node22 Node.js/npm 运行时 prefix
-code/VSCodeModelSwitch/                       源码和 package-lock.json
-code/VSCodeModelSwitch/node_modules/          项目依赖，可由 npm ci 重建
+code/AgentDeck/                       源码和 package-lock.json
+code/AgentDeck/node_modules/          项目依赖，可由 npm ci 重建
 ```
 
 入口脚本只负责检查和加载已有 prefix。下载、解包、依赖安装、编译和打包
@@ -140,7 +140,7 @@ echo "$VSCODEMODELSWITCH_ROOT"
 echo "$VSCODEMODELSWITCH_NODE_PREFIX"
 ```
 
-预期源码路径为 `code/VSCodeModelSwitch`，Node 版本为 22.x。
+预期源码路径为 `code/AgentDeck`，Node 版本为 22.x。
 
 入口只加载已存在的 Node/npm，不会自动下载、安装、编译或启动 VS Code。
 退出 child shell 使用：
@@ -178,7 +178,7 @@ npm run package
 成功产物为：
 
 ```text
-/home/workspace/Forest_Interface/code/VSCodeModelSwitch/vscodemodelswitch-<version>.vsix
+/home/workspace/Forest_Interface/code/AgentDeck/vscodemodelswitch-<version>.vsix
 ```
 
 可用以下命令检查包内容：

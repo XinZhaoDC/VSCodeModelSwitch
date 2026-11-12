@@ -1,3 +1,10 @@
+# 0.8.1 current Codex contract
+
+0.10.0 当前客户端边界、供应商群组/禁用/模板和 v2 导入导出以 [client-architecture.md](client-architecture.md) 为准；下文保留原有 Provider/协议功能说明。
+
+
+Codex account history and SQLite are shared by profile in ai_client_data/codex; auth/config and active bindings are private to environment+profile. Native Codex Chats browses history. The Codex UI has overview, storage, network, sign-in mode, official accounts and API Providers (including Add); the inactive mode is read-only. Global refresh reads current data only. Impactful changes always require one explicit confirmation; no extension/CLI busy detection or force/retry gates remain. Operation logs have a default environment-local path and verified relocation; Codex results stay above their originating module, without scrolling. Config/binding changes use persistent operation recovery; Codex no longer accumulates .bak files. See [management](management.md) for the current migration, credential and compatibility rules. Earlier baseline implementation descriptions below are historical where they conflict with this contract.
+
 # VSCodeModelSwitch Product Logic
 
 ## 产品定位
@@ -26,7 +33,7 @@ Verify/Apply，使用临时连接或Codex会话；结果按模型和配置版本
 6. Apply 写入前备份，并用保存的完整模板替换目标配置文件。
 7. Provider 的 proxy 元数据保存连接模式、兼容预设及差异覆盖；默认直接连接。模板描述上游，Apply 才生成 localhost 客户端副本。
 8. Save 不改变已运行代理；Verify 使用临时路由。每个 Provider 独立入口，本地运行不等于模型请求成功。
-9. Codex 模式属于工具级操作。界面显示 Current mode，提供 `Use Official Account` 和 `Apply API Provider` 按钮；切换时清空 `config.toml` 与 `auth.json`，官方模式随后重新登录，API 模式写入所选源。已在官方模式时禁用官方按钮，保留当前登录；API 模式不依赖之前存在 active provider。
+9. Codex 模式属于工具级操作。界面显示 Current mode，提供 `Use Official Account` 和 `Apply API Provider` 按钮；官方模式保留认证缓存；跨官方/API身份先选择受管理的身份目录，API 模式写入所选源。已在官方模式时禁用官方按钮，保留当前登录；API 模式不依赖之前存在 active provider。
 10. 顶部状态采用 Tool / Mode / Provider Name / Model ID / Status。官方账号无需创建 Provider：本地有登录凭据时显示 Signed in，否则 Login required；未指定模型显示 Client default。该状态不验证远端登录有效期。
 11. 两种工具分别保存已应用代理快照和 SecretStorage 引用；Save 与临时 Verify 不覆盖已运行路由，重载恢复上次应用的配置。模式切换和当前模式显示只在操作成功后更新。
 

@@ -30,9 +30,8 @@ export class EnvManager {
       }
     }
 
-    for (const [key, value] of Object.entries(env)) {
-      collection.replace(key, value);
-    }
+    // Return a tool terminal's environment, never inject API credentials or
+    // routing into every terminal in the VS Code window.
 
     return env;
   }

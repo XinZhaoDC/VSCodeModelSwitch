@@ -1,0 +1,262 @@
+/** Translate errors at presentation boundaries only. Internal error strings and
+ * diagnostic logging remain stable; unknown service/system details are retained. */
+export function userFacingError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const known: Record<string, string> = {
+  "Official Codex mode has no API endpoint to test": "官方账号模式没有可单独测试的 API 供应商地址，请使用“当前账号诊断”。",
+  "Official Codex mode has no API model verification": "官方账号模式请使用“当前账号诊断”，不执行 API 供应商模型验证。",
+  "Official Codex mode has no API model endpoint": "官方账号模式不使用 API 供应商的模型列表接口。",
+  "Providers must belong to the same tool": "只能在同一工具的供应商之间调整顺序。",
+  "Applied proxy key is missing; Apply this provider again": "已应用的兼容转发密钥不可用，请重新应用该供应商。",
+  "Applied proxy port differs; Apply this provider again": "兼容转发端口与已应用配置不同，请重新应用该供应商。",
+  "API provider not found": "未找到 API 供应商。",
+  "Apply pending changes before starting this proxy": "配置有尚未应用的更改，请先应用供应商，再启动兼容转发。",
+  "Switch to the managed API identity before applying API settings. The current official login was kept.": "请先切换到受管 API 档案再应用 API 设置；当前官方账号登录缓存已保留。",
+  "Enter an HTTP proxy URL, such as http://127.0.0.1:12000": "请填写 HTTP 代理入口，例如 http://127.0.0.1:12000。",
+  "Use an HTTP proxy URL without credentials, path, query or fragment": "请使用不含用户名密码、路径、查询参数或片段的 HTTP 代理入口。",
+  "Select Claude Code, Codex, or both": "请选择要设置代理的工具。",
+  "Bypass entries must be host names or IP addresses, not URLs or CIDR ranges": "绕过列表请填写主机名或 IP 地址，不填写完整网址或 CIDR 网段。",
+  "Network proxy request exceeded the redirect limit": "代理连接的跳转次数过多，请检查代理入口。",
+  "Configuration cannot be empty": "配置内容不能为空。",
+  "Claude env object is required": "Claude 配置中需要提供 env 对象。",
+  "Codex model_provider must be OpenAI": "Codex 配置中的 model_provider 必须设为 OpenAI。",
+  "Codex base_url is required": "Codex 配置中缺少 base_url。",
+  "Invalid proxy connection mode": "API 请求处理方式无效，请重新选择。",
+  "Invalid proxy preset": "兼容转发预设无效，请重新选择。",
+  "Invalid upstream API format": "供应商 API 格式无效，请重新选择。",
+  "Claude Code requires an Anthropic upstream": "Claude Code 需要使用 Anthropic 兼容的供应商接口。",
+  "Proxy overrides must be a JSON object": "兼容转发覆盖参数必须是 JSON 对象。",
+  "Messages path must be an absolute API path": "接口路径必须以 / 开头，并且不含查询参数或片段。",
+  "Invalid proxy authentication mode": "兼容转发认证方式无效。",
+  "Invalid authentication header name": "认证请求头名称无效。",
+  "Invalid additional request header": "附加请求头格式无效。",
+  "Configure authentication with Auth mode/Header; do not put credentials in additional headers": "请通过认证方式和认证请求头设置密钥，不要在附加请求头中填写凭据。",
+  "Tool map values must be unique nonempty names": "工具映射名称不能为空，且不能重复。",
+  "Tool mapping, text tool protocol and web tools require stream rebuilding": "工具映射、文本工具协议和网页工具需要启用“重建响应流”。",
+  "Codex to Anthropic translation requires stream rebuilding": "将 Codex 请求转换为 Anthropic 格式时，需要启用“重建响应流”。",
+  "Responses uses reasoning.effort in additional parameters; numeric thinking budgets require an Anthropic upstream": "Responses 使用附加参数 reasoning.effort 设置推理强度；数值思考预算只适用于 Anthropic 接口。",
+  "Credentials cannot be stored in proxy parameters": "请勿在兼容转发的附加参数中保存密钥或登录凭据。",
+  "Use a unique identity name (1–100 characters)": "请使用不重复的账号档案名称，长度为 1–100 个字符。",
+  "Identity not found": "未找到账号档案，请刷新状态后重试。",
+  "Invalid legacy identity manifest": "旧版账号清单格式无效，请检查数据目录。",
+  "Invalid profile registry": "账号档案清单格式无效，请检查数据目录。",
+  "Invalid environment binding": "当前环境的账号绑定记录无效，请重新连接数据目录。",
+  "Invalid identity entry": "账号档案记录格式无效，请检查数据目录。",
+  "Only one API history library is supported": "所有 API 供应商共用一个 API 历史库，不能重复创建。",
+  "Invalid session path": "会话文件路径无效。",
+  "Backup destination must be outside the Codex home": "备份目标必须位于当前 Codex 数据目录之外。",
+  "History changed during backup. Incomplete folder retained; close all Codex clients and retry.": "备份期间聊天历史发生了变化。不完整备份已保留，请结束聊天写入后重试。",
+  "Invalid history backup": "历史备份格式无效。",
+  "Backup contains a non-history file": "备份包含非历史文件，不能作为聊天历史使用。",
+  "History backup checksum mismatch": "历史备份校验失败，文件可能已发生变化。",
+  "Restored history checksum mismatch": "恢复后的历史文件校验失败。",
+  "History cannot follow symbolic links": "历史文件包含不支持的符号链接。",
+  "History entry is not a regular file": "历史记录入口不是普通文件。",
+  "External modification": "文件已被其他程序修改，请核对后重试。",
+  "Invalid recovery copy": "恢复副本校验失败，请保留恢复材料并检查目录。",
+  "Codex speed test requires an existing ChatGPT login": "官方账号测速需要先在当前环境登录 Codex。",
+  "Codex did not return a thread": "Codex 没有返回测试会话，请检查客户端状态。",
+  "No visible text received": "没有收到可见文本，无法计算生成速度。",
+  "Request cancelled or timed out": "请求已取消或超时。",
+  "Expected a native SSE stream": "供应商没有返回预期的 SSE 流式响应。",
+  "Invalid SSE JSON": "供应商返回的流式 JSON 格式无效。",
+  "Model stream failed or was incomplete": "模型流式响应失败或不完整。",
+  "Tool call is not a text benchmark sample": "响应包含工具调用，不能作为短文本测速样本。",
+  "Model output was incomplete": "模型输出不完整。",
+  "Model output token limit reached": "模型输出达到 token 上限，当前样本不完整。",
+  "Model response did not complete": "模型响应未完成。",
+  "Stream ended without a completion event": "响应流提前结束，没有收到完成事件。"
+};
+  if (Object.hasOwn(known, message)) return known[message];
+  const patterns: Array<[RegExp, string]> = [
+    [/^Duplicate imported provider name: (.+)$/, '导入文件中存在重复的供应商名称：$1'],
+    [/^Unknown proxy setting: (.+)$/, '无法识别兼容转发参数：$1'],
+    [/^(.+) must be a boolean$/, '参数 $1 必须为 true 或 false。'],
+    [/^(.+) must be a nonnegative integer \(0 disables the limit\)$/, '参数 $1 必须为非负整数，0 表示不限制。'],
+    [/^(.+) must be between (.+) and (.+)$/, '参数 $1 必须介于 $2 和 $3 之间。'],
+    [/^(.+) must be a JSON object$/, '参数 $1 必须为 JSON 对象。'],
+    [/^Proxy owns (.+); do not override it with additional parameters$/, '字段 $1 由兼容转发管理，不能通过附加参数覆盖。'],
+    [/^Codex section \[(.+)\] is required$/, 'Codex 配置中缺少 [$1] 区段。'],
+    [/^Invalid environment identity marker: (.+)$/, '当前环境标识文件无效：$1'],
+    [/^Unsupported file: (.+)$/, '不支持的文件类型：$1'],
+    [/^Model request HTTP (\d+)$/, '模型请求失败，HTTP 状态码：$1']
+  ];
+  for (const [pattern, replacement] of patterns) if (pattern.test(message)) return message.replace(pattern, replacement);
+  if (/[\u4e00-\u9fff]/.test(message)) return message;
+  const explanation = /EACCES|EPERM/.test(message) ? '没有访问所选文件或目录的权限。' : /ENOENT/.test(message) ? '所选文件或目录不存在，请检查路径或挂载。' : /ECONNREFUSED/.test(message) ? '目标拒绝连接，请检查代理入口或服务是否启动。' : /ENOTFOUND|EAI_AGAIN/.test(message) ? '无法解析目标地址，请检查网络和代理设置。' : /ENOSPC/.test(message) ? '存储空间不足。' : /JSON|Unexpected token|Unexpected end of/.test(message) ? '配置内容无法解析，请检查文件格式。' : '操作未完成，请根据错误详情检查设置或服务状态。';
+  return explanation + '\n错误详情（原文）：' + message;
+}
+
+/** Localize UI text nodes only: never rewrite scripts, URLs, input values,
+ * provider names, configuration templates or model identifiers. */
+export function localeScript(language: string): string {
+  const bilingualPattern = /^([^\n\/:：]+) \/ ([^\u4e00-\u9fff\n]+)$/;
+  const pairs = [
+    ['First round', '首轮结果'], ['Three-round summary', '三轮汇总'], ['Configuration writes', '配置写入'], ['Codex configuration files in this environment', '当前环境的 Codex 配置文件'], ['Sandbox folder', '隔离测试目录'], ['Disabled', '已关闭'], ['Overview', '总览'], ['Data & storage', '数据与存储'], ['Accounts & API', '账号与 API'], ['Sign-in mode', '登录方式'], ['Official account', '官方账号'], ['Official accounts', '官方账号'], ['API providers', 'API 供应商'], ['Network', '网络'], ['Network guide', '网络使用说明'], ['History backups', '历史备份'], ['Provider configuration', '供应商配置'], ['Operation logs', '操作日志'], ['Folder guide', '目录说明'],
+    ['Apply', '应用'], ['Config', '配置'], ['Delete', '删除'], ['Model', '模型'], ['Name', '名称'], ['Tool', '工具'], ['Save', '保存'], ['Close', '关闭'], ['Cancel', '取消'], ['Details', '详情'], ['Active', '当前使用'], ['Refresh models', '刷新模型列表'], ['Refresh model list', '刷新模型列表'], ['Choose model', '选择模型'], ['Verify selected model', '验证所选模型'], ['Provider diagnostics', '供应商诊断'], ['Check connection and quota', '检查连接与额度'], ['Test generation and speed', '测试生成与速度'], ['Current account diagnostics', '当前账号诊断'], ['Models and limits', '模型与额度'], ['API request handling', 'API 请求处理方式'], ['Direct API', '直接调用 API'], ['Local compatibility relay', '本地协议兼容转发'], ['Connection mode', 'API 请求处理方式'], ['Direct connection', '直接调用 API'], ['Built-in proxy', '本地兼容转发'], ['Proxy preset', '兼容转发预设'], ['Advanced proxy settings', '兼容转发高级设置'], ['Restore preset defaults', '恢复预设默认值'], ['Upstream API format', '供应商 API 格式'],
+    ['API Key', 'API 密钥'], ['Base URL', 'API 地址'], ['Model ID', '模型 ID'], ['Add Provider', '添加供应商'], ['Save Provider', '保存供应商'], ['Fetch Models', '获取模型列表'], ['Add mode', '添加方式'], ['Key fields', '基本字段'], ['Full configuration', '完整配置'], ['Configuration template', '配置模板'], ['Set active after saving', '保存后应用'], ['Enable Usage Query', '启用额度查询'], ['Usage preset', '额度查询预设'], ['Auto Detect', '自动识别'], ['Generic Balance', '通用余额'], ['Custom', '自定义'], ['Usage URL', '额度接口地址'], ['Display unit', '显示单位'], ['Value divisor', '数值除数'], ['Management User ID', '管理用户 ID'], ['Management Access Token', '管理访问令牌'], ['Test Usage Query', '测试额度查询'],
+    ['Network & Usage', '连接与额度'], ['Verify Model', '验证模型'], ['Signed in', '已登录'], ['Login required', '需要登录'], ['Unactivated', '尚未应用'], ['Network error', '网络错误'], ['Key missing', '缺少密钥'], ['Models stale', '模型列表已过期'], ['Degraded', '存在异常'], ['Ready', '配置就绪'], ['Off', '未启用'], ['Unknown', '未知'], ['Not configured', '尚未配置'], ['Client default', '客户端默认'], ['Reachable', '可达'], ['Unreachable', '不可达'], ['Not tested', '未测试'], ['Not enabled', '未启用'], ['Unavailable', '不可用'], ['Cancelled', '已取消'], ['Passed', '通过'], ['Failed', '失败'], ['Models OK', '模型目录正常'], ['Models error', '模型目录错误'], ['Models unavailable', '模型目录不可用'], ['Usage', '额度'], ['Speed', '生成速度'], ['N/A', '暂无数据'], ['estimated', '估算'], ['Stale', '结果已过期'], ['Mixed conditions', '测试条件不同'], ['Buffered stream', '流经过缓冲'], ['Output timing unavailable', '缺少输出计时'],
+    ['Running', '运行中'], ['Stopped', '已停止'], ['Start', '启动'], ['Stop', '停止'], ['Restart', '重新启动'], ['Log', '日志'], ['Proxy Details', '兼容转发详情'], ['API protocol compatibility', 'API 协议兼容'], ['Diagnose providers', '批量诊断供应商'], ['Save provider configuration as', '另存为供应商配置'], ['Import provider configuration', '导入供应商配置'], ['Save to data folder', '保存到数据目录'], ['Browse logs', '浏览日志'], ['View current log', '查看当前日志'], ['Export logs', '导出诊断日志'], ['Delete logs', '删除日志'], ['Browse backups', '浏览历史备份'], ['Back up history', '备份当前历史'], ['Delete backups…', '删除历史备份…'], ['Open current files', '打开当前配置'], ['Open Codex terminal', '打开 Codex 终端'], ['Configuration management', '配置管理'], ['Manage Codex configuration', '启用 Codex 配置管理'],
+    ['Reload window', '重新加载窗口'], ['Dismiss reminder', '关闭提醒'], ['Waiting for reload', '等待重新加载'], ['Temporary reminder', '临时提醒'], ['Select a preset (draft only)', '选择预设（只填入草稿）'], ['Note', '备注'], ['Copy settings', '复制设置'], ['Paste settings', '粘贴设置'], ['Save preset', '保存为预设'], ['Delete preset', '删除预设'], ['HTTP proxy URL', 'HTTP 代理入口'], ['Bypass targets', '绕过代理的目标地址'], ['Connect storage', '连接数据目录'], ['Browse data', '浏览数据文件'], ['Open folder guide', '打开目录说明'],
+    ['Refresh status', '刷新状态'], ['Save provider', '保存 Provider'], ['Apply provider', '应用 Provider'], ['Open configuration', '打开配置'], ['Save configuration', '保存配置'], ['Read models and limits', '读取模型与额度'], ['Copy or paste network settings', '复制或粘贴网络设置'], ['Manage network presets', '管理网络预设'],
+    ['Local configuration checked; verify the actual route in the client.', '本地配置已核查；实际聊天路由需在客户端验证。'], ['Legacy proxy settings need migration. Apply again or disable to restore.', '旧版代理配置尚未迁入独立启动方式；请重新应用或停用恢复。'], ['Independent proxy settings saved. Reload the client. Browser routing and VPN node selection are managed separately.', '独立代理配置已保存，请重新加载客户端。浏览器及 VPN 选节点不由本设置管理。'], ['Previous proxy settings restored for this tool. Reload the client.', '当前工具的原代理配置已恢复，请重新加载客户端。'],
+    ['Authentication error', '认证错误'], ['Unsupported endpoint', '接口不支持'], ['Request rejected', '请求被拒绝'], ['DNS error', 'DNS 错误'], ['Transport error', '传输错误'], ['URL and key are required before fetching models.', '获取模型列表前请填写 API 地址和密钥。'], ['Name is required.', '请填写名称。'], ['API request handling is separate from the VPN HTTP proxy.', 'API 请求处理方式与 VPN 的 HTTP 代理分别设置。'],
+    ['登录方式', '登录方式'], ['Current account or provider', '当前账号或供应商'], ['Authentication or connection configuration', '认证或连接配置'], ['Chat network route', '聊天网络路由'], ['Default model', '默认模型'], ['History binding', '历史绑定'], ['Configuration location', '配置位置'], ['Not managed by ModelSwitch', '未由本插件管理'], ['Not applicable', '不适用'], ['Unmanaged official account', '未管理的官方账号'], ['Not applied', '尚未应用'], ['Selected by Codex', '由 Codex 客户端选择'], ['Current environment folder', '当前环境原目录'], ['Binding error', '绑定异常'], ['Connected', '已连接'],
+    ['Choose a sign-in mode, then manage its accounts or providers. The other mode keeps its configuration and is read-only.', '选择登录方式，再管理对应账号或供应商。另一种方式的配置保留并以只读显示。'],
+    ['Connect a local or mounted data folder to share an account\'s history in Codex Chats. Credentials and client configuration remain environment-specific.', '连接本机或挂载的数据目录，让同一账号在不同环境的 Codex Chats 中使用相同历史。认证与客户端配置按环境保存。'],
+    ['Create one history profile per official account. Connect storage first; cached sign-in is reused only in this environment.', '为每个官方账号保存独立历史档案。请先连接数据目录；登录缓存仅在当前环境复用。'],
+    ['Set this tool\'s HTTP proxy entry. Codex and Claude are applied independently; your VPN or browser manages node selection and browser routing.', '设置当前工具使用的 HTTP 代理入口。Codex 与 Claude 分别保存和应用；VPN 节点选择及浏览器路由由 VPN 或浏览器管理。'],
+    ['Each backup is an independent full snapshot. Old backups are retained. Chats and indexes are included; credentials, client settings and project source are excluded. Pause chat writes while backing up.', '每次创建独立完整快照，旧备份保留；包含聊天与索引，不含登录凭据、客户端配置或项目源码。备份时请暂停写入聊天。'],
+    ['Exports contain Codex API provider URLs, models and configuration options, without chats or stored secrets. Both save actions use the same format. Importing does not apply a provider.', '保存 Codex API 供应商的地址、模型和配置选项，不保存聊天或已存储的密钥。两个保存按钮内容相同，仅位置不同；导入不自动应用。'],
+    ['Logs use the extension default folder before storage is connected. Existing logs move when storage is connected. Logs are environment-specific and omit credentials and chat content.', '未连接数据目录时使用插件默认日志路径；连接目录时搬迁已有日志。日志按环境保存，不记录认证或聊天正文。'],
+    ['Refreshing updates the catalog only. Choosing saves a default model. Verification sends one real short request.', '刷新列表只更新目录；选择模型会保存默认模型；验证发送一次真实短请求。'],
+    ['Connection checks read the model catalog and enabled quota endpoint. Generation tests send three short requests without applying the provider.', '连接检查读取模型目录和已启用的额度接口；生成测速执行三次短请求，不会应用此供应商。'],
+    ["Changes that affect running clients require confirmation. Finish extension and CLI tasks first.", "影响运行的设置变更前会要求确认；请先结束扩展和 CLI 中正在进行的任务。"],
+    ["Disabling stops ModelSwitch from applying Codex settings. It does not uninstall Codex or undo written configuration. The terminal button opens the CLI without changing providers.", "停用后本插件不再应用 Codex 配置；不会卸载 Codex，也不会撤销已写入配置。终端按钮启动命令行客户端，不更换当前供应商。"],
+    ["Choose any folder name. ModelSwitch uses its codex subfolder, or you can select that subfolder directly. profiles holds shared history; environments holds local settings and credentials; backups holds manual snapshots; providers holds optional exports.", "文件夹名称由你决定。插件在所选位置使用 codex 子目录，也支持直接选择该子目录。profiles 保存共享历史；environments 保存各环境配置和认证；backups 保存手动历史快照；providers 保存可选的供应商导出。"],
+    ["This is the HTTP listener supplied by your VPN software, not a remote VPN node. Ports are examples; use the actual listening port. Host-network containers share loopback with the host; other containers usually need a reachable host address.", "代理入口是 VPN 软件提供的本地 HTTP 监听地址，不是远端 VPN 节点。示例端口仅用于填写参考，请以 VPN 软件为准。host 网络容器可使用宿主回环地址，其他容器模式通常需要宿主可达地址。"],
+    ["Requests to api.example.com use the proxy unless bypassed. localhost, 127.0.0.1 and ::1 bypass the HTTP proxy. Enter destination hosts, not full URLs. Keep local exceptions for the compatibility relay.", "访问目标如 api.example.com 时，若它不在绕过列表，请求交给代理；访问 localhost、127.0.0.1 或 ::1 时绕过 HTTP 代理。绕过列表填写目标主机，不填写完整网址。保留本地例外让客户端连接本地兼容转发。"],
+    ["The connection test does not verify sign-in or chat. Pasting or selecting a preset changes the draft only. Apply to change startup settings. ModelSwitch does not fall back to direct connections.", "连接测试只检查传输，不代表账号或聊天可用。粘贴和选择预设只更改草稿，应用后才改变启动配置。插件不自动切换为直连。"],
+    ["The independent Codex Linux launcher is experimental. Public registration and Windows/WSL restrictions are explained before applying.", "Codex Linux 独立入口目前为实验功能；应用前会说明公共启动注册及 Windows/WSL 限制。"],
+    ["Generation testing sends three short requests using the current account quota. Results include the first round and three-round medians. Reading models and limits does not switch accounts.", "生成测试执行三次短请求，消耗当前账号额度；报告首轮结果及三轮中位数。模型与额度读取不切换账号。"],
+    ["An account name is a local profile alias. Confirm the matching sign-in in official Codex.", "账号名称是本地档案别名，请在官方 Codex 确认登录对应账号。"],
+    ["Choose direct API requests or local protocol compatibility forwarding. VPN routing is configured separately.", "选择直接调用或本地协议兼容转发，与 VPN 网络路由分别设置。"],
+    ["Only some providers support quota queries. A management token may differ from the model API key. Enabled queries run with connection diagnostics.", "仅部分供应商支持额度查询；管理令牌可能不同于模型 API 密钥。启用后连接诊断会同时查询额度。"],
+    ["Local HTTP listener (example: 12000)", "本机 HTTP 入口（示例 12000）"],
+    ["Local HTTP listener (example: 7890)", "本机 HTTP 入口（示例 7890）"],
+    ["Host address (requires environment support)", "宿主机地址（需环境支持）"],
+    ["Select and apply an API provider below. View history in official Codex Chats.", "在下方选择 API 供应商并应用；历史在官方 Codex Chats 查看。"],
+    ["API mode is active. This section is read-only. Switch to official mode above to edit accounts.", "当前为 API 模式，此区域只读。通过上方模式按钮切回官方账号。"],
+    ["Select and apply a provider. Configuration applies only to this environment.", "选择供应商并应用；配置只应用到当前环境。"],
+    ["Official mode or a pending reload makes this section read-only. Switch to API above to edit providers.", "当前为官方模式或等待重载，本区域只读。通过上方模式按钮切换到 API。"],
+    ["Connect a folder under Data & storage to preserve history and enable multiple accounts.", "先在“数据与存储”连接目录，保存当前历史并启用多账号管理。"],
+    ["Connect storage under Data & storage before adding multiple official accounts.", "先在数据与存储连接目录，才能添加多个官方账号。"],
+    ["Shared history and indexes are connected. Settings and credentials are isolated by environment.", "历史目录与索引已连接；配置及认证按环境隔离。"],
+    ["No account history is connected.", "尚未连接账号历史。"],
+    ["No official account profiles have been added.", "尚未添加官方账号档案。"],
+    ["Legacy layout; explicit migration required.", "旧版结构，等待显式迁入。"],
+    ["Loading", "读取中"],
+    ["API request handling", "API 请求处理"],
+    ["Select a custom preset first.", "请先选择一个自定义预设。"],
+    ["Model list is temporarily unavailable", "模型列表暂不可用"],
+    ["Quota query is temporarily unavailable", "额度查询暂不可用"],
+    ["No quota windows were returned", "当前账号未返回额度窗口"],
+    ["Connect storage to create and manage history backups.", "连接数据目录后可创建和管理历史备份。"],
+    ["You can save to a file before connecting storage.", "未连接数据目录仍可另存为文件。"],
+    ["A folder guide is created when storage is connected.", "连接后由插件创建目录说明文件。"],
+    ["Next: reload the window, then open Codex.", "下一步：重载窗口，再打开官方 Codex。"],
+    ["A legacy folder is retained. Use Connect storage to migrate it.", "旧版目录仍保留，请通过“连接/迁入目录”升级存储结构。"],
+    ["The folder binding is invalid. Check the mount and reconnect.", "目录绑定异常，请检查挂载并重新连接。"],
+    ["Choose an account below; view conversations in official Codex Chats.", "选择下方账号切换；聊天在官方 Codex Chats 查看。"],
+    ["◷ Binding changed · reload required", "◷ 绑定已更改 · 待重载"],
+    ["◷ API profile selected · apply a provider", "◷ API 档案已选 · 待应用 Provider"],
+    ["○ Mode not yet confirmed", "○ 模式待确认"],
+    ["✓ Current account", "✓ 当前账号"],
+    ["Enable", "启用代理"],
+    ["Disable", "停用并恢复"],
+    ["Test", "测试连接"],
+    ["Configuration", "配置管理"],
+    ["Provider Configuration", "供应商配置"],
+    ["Provider Name", "供应商名称"],
+    ["Providers", "供应商"],
+    ["Status", "状态"],
+    ["Mode", "模式"],
+    ["Enabled", "已启用"],
+    ["Export", "导出配置"],
+    ["Import", "导入配置"],
+    ["Delete Log", "删除日志"],
+    ["Quick Speed Test", "快速测速"],
+    ["Standard Speed Test", "标准测速"],
+    ["Quick Speed Test · Official", "快速测速 · 官方账号"],
+    ["Standard Speed Test · Official", "标准测速 · 官方账号"],
+    ["Copy AI Speed Query", "复制测速查询命令"],
+    ["Compatibility preset", "兼容预设"],
+    ["Custom upstream", "自定义供应商"],
+    ["Upstream API path", "供应商接口路径"],
+    ["Upstream authentication", "供应商认证方式"],
+    ["Custom header", "自定义请求头"],
+    ["Custom authentication header name (key comes from SecretStorage)", "自定义认证请求头名称（密钥使用已保存的安全存储值）"],
+    ["Additional headers (JSON, no credentials)", "附加请求头（JSON，不含凭据）"],
+    ["Additional request parameters (JSON)", "附加请求参数（JSON）"],
+    ["Native tool name map (JSON)", "原生工具名称映射（JSON）"],
+    ["Rebuild the response stream", "重建响应流"],
+    ["Use text protocol for unmapped tools", "未映射的工具使用文本协议"],
+    ["Repair malformed tool JSON", "修复格式错误的工具 JSON"],
+    ["Add a system cache breakpoint", "添加系统提示词缓存断点"],
+    ["Let the proxy execute web search / fetch", "允许兼容转发执行网页搜索或读取"],
+    ["Anthropic Messages (translate Codex requests)", "Anthropic Messages（转换 Codex 请求）"],
+    ["Configuration changed · Pending Apply", "配置已更改 · 等待应用"],
+    ["Key missing on this machine", "当前环境尚未保存密钥"],
+    ["Apply to start a local endpoint", "应用配置后启动本地转发入口"],
+    ["Loading...", "读取中…"],
+    ["Default", "默认"],
+    ["Leave empty to keep the stored key", "留空则保留已保存的密钥"],
+    ["Fetch models or enter an ID", "获取模型列表或手动填写模型 ID"],
+    ["Each provider belongs to exactly one tool. Model ID is optional and can be fetched or entered manually.", "每个供应商只属于一个工具。模型 ID 可选，可获取列表或手动填写。"],
+    ["Enter the real upstream URL and key above. The local endpoint is generated on Apply. Keep this VS Code window open while using the proxy.", "在上方填写供应商真实地址与密钥。应用时生成本地转发入口；使用转发期间请保持当前 VS Code 窗口打开。"],
+    ["Choose the API your provider serves. Changing the format restores that format's preset defaults. Anthropic translation needs full history and stream rebuilding; hosted OpenAI tools and encrypted OpenAI state require Responses.", "选择供应商提供的 API 格式。更改格式会恢复对应预设默认值。Anthropic 转换需要完整历史并重建响应流；OpenAI 托管工具与加密状态需要 Responses。"],
+    ["Overrides apply only to this provider. History/tool-output limits may omit context; omissions are marked. Stream rebuilding is required for tool mapping and proxy web tools.", "覆盖参数只影响当前供应商。限制历史或工具输出可能省略上下文，省略内容会有标记。工具映射与网页工具需要重建响应流。"],
+    ["Responses uses reasoning.effort (for example {\"reasoning\":{\"effort\":\"high\"}} in additional parameters), not numeric thinking budgets. System caching sets a stable prompt_cache_key; the upstream decides whether to cache. Native function and custom tools, images and encrypted reasoning retain their Responses formats.", "Responses 使用 reasoning.effort（可在附加参数中填写 {\"reasoning\":{\"effort\":\"high\"}}），不使用数值思考预算。系统缓存使用固定 prompt_cache_key，是否缓存由供应商决定。函数、自定义工具、图像与加密推理保留 Responses 格式。"],
+    ["Output = visible-text generation rate; TTFT = request to first text; Overall = throughput including first-text wait. tok/s means tokens per second, estimated locally. Comparable successful samples only; medians shown. Client startup and session preparation are excluded.", "输出速度指可见文本生成速度；TTFT 指请求发出至首个文本返回的时间；全程速度包括首字等待。tok/s 表示每秒 token 数，为本地估算。仅汇总条件可比的成功样本并显示中位数，不含客户端启动与会话准备时间。"],
+    ["The proxy buffers or rebuilds the stream; original generation timing is unavailable.", "兼容转发缓冲或重建了响应流，无法获得原始生成计时。"],
+    ["Text arrived in one batch or the timing interval was too short; no output rate is available.", "文本一次性返回或计时间隔过短，无法计算输出速度。"],
+    ["Mixed models or measurement conditions; aggregate metrics are suppressed.", "模型或测试条件不同，不显示汇总指标。"],
+    ["Fixed short-text benchmark, not live conversation monitoring. For work efficiency, compare time to a correct completed task on the same task and acceptance criteria.", "这是固定短文本测试，不监控正在进行的聊天。评估实际效率时，应使用相同任务与验收标准比较正确完成任务的用时。"],
+    ["Resume the last applied configuration; use Apply for saved changes.", "恢复上次已应用的配置；使用“应用”按钮写入新保存的更改。"],
+    ["Choose a tool and copy a read-only command for its current provider. Reads stored results; no new model request.", "选择工具并复制当前供应商的只读查询命令。仅读取已保存结果，不发起新的模型请求。"],
+    ["Name is required.", "请填写名称。"],
+    ["No Codex providers yet.", "尚未添加 Codex API 供应商。"],
+    ["No Claude Code providers yet.", "尚未添加 Claude Code 供应商。"],
+    ["Localhost", "本机"],
+    ["Manual", "手动"],
+    ["NULL", "未指定模型"],
+    ["Request timeout (ms)", "请求超时（毫秒）"],
+    ["History messages (0 = unlimited)", "保留历史消息数（0 表示不限）"],
+    ["History characters (0 = unlimited)", "历史字符数（0 表示不限）"],
+    ["Tool result characters (0 = unlimited)", "工具结果字符数（0 表示不限）"],
+    ["Output token cap (0 = client limit)", "输出 token 上限（0 表示遵循客户端）"],
+    ["Tool description characters (0 = full)", "工具说明字符数（0 表示完整）"],
+    ["Extra thinking tokens (0 = follow client)", "额外思考 token 数（0 表示遵循客户端）"],
+    ["Thinking token cap (0 = client limit)", "思考 token 上限（0 表示遵循客户端）"],
+    ["Web search result count", "网页搜索结果数"],
+    ["Web fetch characters (0 = unlimited)", "网页读取字符数（0 表示不限）"],
+    ["Maximum web tool rounds", "网页工具最大轮数"],
+    ["Name, URL, and key are required.", "请填写名称、API 地址和密钥。"],
+    ["Maximum attempts", "最多尝试次数"],
+    ["Keepalive interval (ms)", "保活间隔（毫秒）"],
+    ["History character budget (0 = unlimited)", "历史字符预算（0 表示不限）"],
+    ["Name and complete configuration are required.", "请填写名称和完整配置。"],
+    ["Saving provider...", "正在保存供应商…"],
+    ["Enter an HTTP proxy URL, such as http://127.0.0.1:12000", "请填写 HTTP 代理入口，例如 http://127.0.0.1:12000"],
+    ["Use an HTTP proxy URL without credentials, path, query or fragment", "请使用不含用户名密码、路径、查询参数或片段的 HTTP 代理入口"],
+    ["Bypass entries must be host names or IP addresses, not URLs or CIDR ranges", "绕过列表请填写主机名或 IP 地址，不填写完整网址或 CIDR 网段"],
+  ];
+  return `
+    const uiChinese = ${JSON.stringify(language.toLowerCase().startsWith('zh'))};
+    const uiPairs = ${JSON.stringify(pairs)};
+    function ui(zh, en) { return uiChinese ? zh : en; }
+    function uiText(text) {
+      let value = text.trim(); if (!value) return text;
+      const chinese = uiChinese;
+      const bilingual = value.match(${bilingualPattern});
+      if (bilingual && /[\u4e00-\u9fff]/.test(bilingual[1]) && /[A-Za-z]/.test(bilingual[2])) value = bilingual[chinese ? 1 : 2];
+      const note = value.startsWith('ⓘ 注：'); if (note) value = value.slice(4);
+      const pair = uiPairs.find(p => value === p[0] || value === p[1]);
+      if (pair) value = pair[chinese ? 1 : 0];
+      if (!chinese) {
+        value = value.replace(/^统一数据目录：/, 'Data folder: ').replace(/CODEX_HOME：未知$/, 'CODEX_HOME: Unknown').replace(/（独立启动配置）$/, ' (independent launch configuration)').replace(/（旧版配置）$/, ' (legacy configuration)').replace(/^请求处理：本地兼容转发/, 'Request handling: local compatibility relay').replace(/^请求处理：直接调用 API$/, 'Request handling: direct API').replace(/^Environment: 读取中$/, 'Environment: Loading').replace(/^Log folder: 读取中$/, 'Log folder: Loading');
+        value = value.replace(/^当前档案：/, 'Current profile: ').replace(/本环境已登录。/, 'Signed in here.').replace(/请在官方 Codex 中确认登录。/, 'Confirm sign-in in Codex.').replace(/^运行环境：/, 'Environment: ').replace(/^当前日志目录：/, 'Log folder: ').replace(/^历史备份位置：/, 'History backups: ').replace(/^默认导出位置：/, 'Default export folder: ').replace(/^插件生成的目录说明：/, 'Generated folder guide: ');
+      }
+      if (chinese) {
+        value = value.replace(/^(Remaining|Output|Overall|Checked|Endpoint|Model|Compatibility|Connection|Proxy):? /, term => ({'Remaining ':'剩余 ','Output ':'输出 ','Overall ':'全程 ','Checked: ':'检查时间：','Endpoint: ':'接口：','Model: ':'模型：','Compatibility: ':'验证：','Connection: ':'请求处理：','Proxy: ':'兼容转发：'})[term] || term);
+        value = value.replace(/(\\d+) models$/, '$1 个模型').replace(/(\\d+) failed$/, '$1 次失败').replace(/(\\d+) cancelled$/, '$1 次取消').replace(/(\\d+\\/\\d+) passed$/, '$1 通过');
+      }
+      return (note ? chinese ? 'ⓘ 注：' : 'ⓘ Note: ' : '') + value;
+    }
+    function localizeUi(root) {
+      if (root && !root.dataset?.rawValue && !root.classList?.contains('providerName')) for (const key of ['title', 'placeholder']) if (typeof root[key] === 'string' && root[key]) root[key] = uiText(root[key]);
+      if (!root || ['INPUT', 'TEXTAREA', 'PRE', 'CODE'].includes(root.tagName) || root.dataset?.rawValue || root.classList?.contains('providerName')) return;
+      for (const node of root.childNodes || []) { if (node.nodeType === 3) node.nodeValue = uiText(node.nodeValue || ''); else localizeUi(node); }
+    }
+  `;
+}

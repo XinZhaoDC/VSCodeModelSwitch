@@ -1,8 +1,8 @@
 {
   "name": "vscodemodelswitch",
-  "displayName": "VSCodeModelSwitch",
-  "description": "AI CLI provider switcher for Claude Code and Codex in VSCode.",
-  "version": "0.6.2",
+  "displayName": "AgentDeck",
+  "description": "统一管理 Codex 与 Claude Code 的账号、API 供应商、独立网络和本地聊天历史。",
+  "version": "0.10.0",
   "publisher": "xinzhaodc",
   "icon": "media/switch_889728.png",
   "license": "SEE LICENSE IN THIRD_PARTY_NOTICES.md",
@@ -47,7 +47,7 @@
       "activitybar": [
         {
           "id": "vscodemodelswitch",
-          "title": "VSCodeModelSwitch",
+          "title": "AgentDeck",
           "icon": "media/activity-icon.svg"
         }
       ]
@@ -56,7 +56,7 @@
       "vscodemodelswitch": [
         {
           "id": "vscodemodelswitch.providerView",
-          "name": "Providers",
+          "name": "客户端管理",
           "type": "webview"
         }
       ]
@@ -64,80 +64,84 @@
     "commands": [
       {
         "command": "vscodemodelswitch.openMenu",
-        "title": "VSCodeModelSwitch: Open Menu"
+        "title": "AgentDeck：打开管理菜单"
       },
       {
         "command": "vscodemodelswitch.addProvider",
-        "title": "VSCodeModelSwitch: Add Provider"
+        "title": "AgentDeck：添加供应商"
       },
       {
         "command": "vscodemodelswitch.switchProvider",
-        "title": "VSCodeModelSwitch: Switch Provider"
+        "title": "AgentDeck：切换供应商"
       },
       {
         "command": "vscodemodelswitch.openClaudeTerminal",
-        "title": "VSCodeModelSwitch: Open Claude Terminal"
+        "title": "AgentDeck：打开 Claude 终端"
       },
       {
         "command": "vscodemodelswitch.openCodexTerminal",
-        "title": "VSCodeModelSwitch: Open Codex Terminal"
+        "title": "AgentDeck：打开 Codex 终端"
       },
       {
         "command": "vscodemodelswitch.viewClaudeConfig",
-        "title": "VSCodeModelSwitch: View Claude Code Config"
+        "title": "AgentDeck：查看 Claude Code 配置"
       },
       {
         "command": "vscodemodelswitch.viewCodexConfig",
-        "title": "VSCodeModelSwitch: View Codex Config"
+        "title": "AgentDeck：查看 Codex 配置"
       },
       {
         "command": "vscodemodelswitch.exportPublicConfig",
-        "title": "VSCodeModelSwitch: Export Public Config"
+        "title": "AgentDeck：导出供应商配置"
       },
       {
         "command": "vscodemodelswitch.importPublicConfig",
-        "title": "VSCodeModelSwitch: Import Public Config"
+        "title": "AgentDeck：导入供应商配置"
       },
       {
         "command": "vscodemodelswitch.speedTest",
-        "title": "VSCodeModelSwitch: Run Speed Test"
+        "title": "AgentDeck：运行生成测速"
       },
       {
         "command": "vscodemodelswitch.copySpeedQuery",
-        "title": "VSCodeModelSwitch: Copy AI Speed Query"
+        "title": "AgentDeck：复制测速查询命令"
       }
     ],
     "configuration": {
-      "title": "VSCodeModelSwitch",
+      "title": "AgentDeck",
       "properties": {
         "vscodemodelswitch.globalCliSync": {
+          "scope": "machine",
           "type": "boolean",
           "default": true,
-          "description": "Write the active provider into Claude Code and Codex config files. Enabled by default."
+          "description": "将当前供应商写入 Claude Code 和 Codex 的配置文件，默认启用。"
         },
         "vscodemodelswitch.configTarget": {
+          "scope": "machine",
           "type": "string",
           "enum": [
             "sandbox",
             "real"
           ],
           "default": "real",
-          "description": "Choose where config writes go. real writes to your actual home directory; sandbox writes to a local test home."
+          "description": "选择配置写入位置：real 写入当前环境的真实用户目录；sandbox 写入隔离测试目录。"
         },
         "vscodemodelswitch.testHome": {
+          "scope": "machine",
           "type": "string",
           "default": "",
-          "description": "Optional home directory override for sandbox config writes."
+          "description": "隔离测试模式下使用的用户目录，留空使用默认测试目录。"
         },
         "vscodemodelswitch.anthropicVersion": {
           "type": "string",
           "default": "2023-06-01",
-          "description": "Anthropic API version header used when fetching Claude-compatible model lists."
+          "description": "获取 Claude 兼容模型列表时使用的 Anthropic API 版本请求头。"
         },
         "vscodemodelswitch.codexExecutablePath": {
+          "scope": "machine",
           "type": "string",
           "default": "",
-          "description": "Optional absolute Codex executable path for official-account speed tests. Empty uses the installed Codex extension binary or PATH."
+          "description": "官方账号诊断和测速使用的 Codex 可执行文件绝对路径。留空时使用已安装 Codex 扩展的二进制文件或 PATH 中的命令。"
         }
       }
     }
@@ -152,7 +156,25 @@
     "test:codex-modes": "npm run compile && node scripts/test-codex-modes.js",
     "test:codex-proxy": "npm run compile && node scripts/test-codex-proxy.js",
     "test:speed": "npm run compile && node scripts/test-speed.js",
-    "test:network": "npm run compile && node scripts/test-network.js"
+    "test:network": "npm run compile && node scripts/test-network.js",
+    "test:sessions": "npm run compile && node scripts/test-sessions.js",
+    "test:environments": "npm run compile && node scripts/test-environments.js",
+    "test:recovery": "npm run compile && node scripts/test-recovery.js",
+    "test:runtime": "npm run compile && node scripts/test-runtime-guard.js",
+    "test:native-history": "npm run compile && node scripts/test-native-history.js",
+    "test:operation-log": "npm run compile && node scripts/test-operation-log.js",
+    "test:codex-ui": "npm run compile && node scripts/test-codex-ui.js",
+    "test:isolated-network": "npm run compile && node scripts/test-isolated-network.js",
+    "test:management": "npm run compile && node scripts/test-management.js",
+    "test:fixed-home": "npm run compile && node scripts/test-fixed-home.js",
+    "test:codex-workflows": "npm run compile && node scripts/test-codex-workflows.js",
+    "test:provider-groups": "npm run compile && node scripts/test-provider-groups.js",
+    "test:group-ui": "npm run compile && node scripts/test-group-ui.js",
+    "test:group-import": "npm run compile && node scripts/test-group-import.js",
+    "test:codex-network": "node scripts/test-codex-network.js",
+    "test:codex-diagnostics": "node scripts/test-codex-diagnostics.js",
+    "test:native-codex-network": "node scripts/test-native-codex-network.js",
+    "test:codex-release": "python3 scripts/test-codex-release.py"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

@@ -1,7 +1,9 @@
-import { backupFile } from '../config/atomicWrite';
-import { readJsonObject, writeJsonObject } from '../config/jsonFile';
-import { ResolvedProvider } from '../types';
-import { resolveHomePath } from '../utils/paths';
+import { FileRecovery } from '../../config/recovery';
+import { readJsonObject } from '../../config/jsonFile';
+import { PROXY_ENV_NAMES } from '../../network/manager';
+import { ResolvedProvider } from '../../types';
+import { getToolHome } from '../../utils/paths';
+import { join } from 'path';
 
 export class ClaudeAdapter {
   async apply(resolved: ResolvedProvider): Promise<void> {
@@ -9,19 +11,25 @@ export class ClaudeAdapter {
       return;
     }
 
-    const settingsPath = resolveHomePath('.claude', 'settings.json');
+    const settingsPath = this.getConfigPath();
     const settings = JSON.parse(resolved.claude.configText) as Record<string, unknown>;
     const env = normalizeObject(settings.env);
+
+    // Provider templates must not erase this environment's independent route.
+    const existing = normalizeObject((await readJsonObject(settingsPath)).env);
+    for (const name of PROXY_ENV_NAMES) {
+      delete env[name];
+      if (Object.hasOwn(existing, name)) env[name] = existing[name];
+    }
 
     env.ANTHROPIC_AUTH_TOKEN = resolved.claude.key;
     settings.env = env;
 
-    await backupFile(settingsPath);
-    await writeJsonObject(settingsPath, settings);
+    await FileRecovery.run(join(getToolHome('claude'), '.recovery', 'modelswitch-current'), tx => tx.write(settingsPath, JSON.stringify(settings, null, 2) + '\n'));
   }
 
   getConfigPath(): string {
-    return resolveHomePath('.claude', 'settings.json');
+    return join(getToolHome('claude'), 'settings.json');
   }
 
   async readActiveConfig(): Promise<{ baseUrl?: string; model?: string; key?: string }> {

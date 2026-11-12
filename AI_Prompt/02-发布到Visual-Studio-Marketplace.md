@@ -19,7 +19,7 @@ GitHub push 本身不会触发普通 VS Code 扩展更新，必须先构建并�
 ```json
 {
   "name": "vscodemodelswitch",
-  "displayName": "VSCodeModelSwitch",
+  "displayName": "AgentDeck",
   "publisher": "xinzhaodc",
   "version": "0.1.0"
 }

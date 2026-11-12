@@ -44,8 +44,8 @@ Module._load = function (name, ...args) { return name === 'vscode' ? vscode : or
 
 let appliedClaude = {}, appliedCodex = {}, failWrite = false, writes = 0;
 const sandboxRoot = settings.testHome;
-const { ClaudeAdapter } = require('../out/adapters/claudeAdapter');
-const { CodexAdapter } = require('../out/adapters/codexAdapter');
+const { ClaudeAdapter } = require('../out/clients/claude/adapter');
+const { CodexAdapter } = require('../out/clients/codex/adapter');
 ClaudeAdapter.prototype.getConfigPath = () => path.join(sandboxRoot, '.claude/settings.json');
 ClaudeAdapter.prototype.readActiveConfig = async () => ({ baseUrl: appliedClaude.env?.ANTHROPIC_BASE_URL, key: appliedClaude.env?.ANTHROPIC_AUTH_TOKEN, model: appliedClaude.model });
 ClaudeAdapter.prototype.apply = async function (resolved) {
@@ -62,12 +62,15 @@ CodexAdapter.prototype.apply = async resolved => {
   writes++;
 };
 CodexAdapter.prototype.applyOfficialMode = async () => { appliedCodex = { mode: 'official' }; writes++; };
+const runtimeGuard = require('../out/shared/runtimeGuard');
+runtimeGuard.confirmCodexChange = async () => true;
+runtimeGuard.inspectCodexActivity = async () => ({ extension: 'idle', cli: 'idle', checkedAt: 'fixture' });
 const { VSModelSwitchApp } = require('../out/app');
 const { SidebarViewProvider } = require('../out/ui/sidebarView');
 const { verifyModel } = require('../out/models/compatibilityCheck');
 
 function context(globalState = new Memento(), workspaceState = new Memento(), secretMap = new Map()) {
-  return { globalState, workspaceState, subscriptions: [], extensionUri: vscode.Uri.file(path.join(__dirname, '..')), logUri: vscode.Uri.file(path.join(sandboxRoot, 'log')),
+  return { globalStorageUri: vscode.Uri.file(path.join(sandboxRoot, 'extension-storage')), globalState, workspaceState, subscriptions: [], extensionUri: vscode.Uri.file(path.join(__dirname, '..')), logUri: vscode.Uri.file(path.join(sandboxRoot, 'log')),
     secrets: { get: async key => secretMap.get(key), store: async (key, value) => { secretMap.set(key, value); }, delete: async key => { secretMap.delete(key); } },
     environmentVariableCollection: { delete() {}, replace() {} } };
 }
@@ -258,10 +261,10 @@ async function testApplication(base, _offered, clear, offered, config) {
     check('Verify uses the edited settings in a temporary route', () => assert.equal(offered().at(-1).payload.temperature, 0.7));
     clear(); response = await fetch(endpoint.baseUrl + '/v1/messages', { method: 'POST', headers: { 'x-api-key': endpoint.key, 'content-type': 'application/json' }, body: JSON.stringify(client()) }); await response.text();
     check('Verify does not alter the already applied route', () => assert.equal(offered().at(-1).payload.temperature, undefined));
-    const oldWrites = writes, oldRecord = ctx.workspaceState.get('vscodemodelswitch.appliedProxy');
-    ctx.workspaceState.failOnceKey = 'vscodemodelswitch.appliedRevisions';
+    const oldWrites = writes, oldRecord = ctx.workspaceState.get(app.environment.key('vscodemodelswitch.appliedProxy'));
+    ctx.globalState.failOnceKey = app.environment.key('vscodemodelswitch.appliedRevisions');
     await assert.rejects(() => app.applyProviderFromSidebar(alpha.id), /metadata write failure/);
-    check('metadata persistence failure leaves the client file and applied snapshot unchanged', () => { assert.equal(writes, oldWrites); assert.equal(ctx.workspaceState.get('vscodemodelswitch.appliedProxy').provider.updatedAt, oldRecord.provider.updatedAt); assert.equal(appliedClaude.env.ANTHROPIC_BASE_URL, endpoint.baseUrl); });
+    check('metadata persistence failure leaves the client file and applied snapshot unchanged', () => { assert.equal(writes, oldWrites); assert.equal(ctx.workspaceState.get(app.environment.key('vscodemodelswitch.appliedProxy')).provider.updatedAt, oldRecord.provider.updatedAt); assert.equal(appliedClaude.env.ANTHROPIC_BASE_URL, endpoint.baseUrl); });
     failWrite = true;
     await assert.rejects(() => app.applyProviderFromSidebar(alpha.id), /Synthetic/); failWrite = false;
     clear(); response = await fetch(endpoint.baseUrl + '/v1/messages', { method: 'POST', headers: { 'x-api-key': endpoint.key, 'content-type': 'application/json' }, body: JSON.stringify(client()) }); await response.text();
@@ -303,28 +306,8 @@ async function testUnsyncedApplication(base, config) {
 
 function testUi() {
   const html = new SidebarViewProvider(vscode.Uri.file('/extension'), {}).getHtml();
-  const elements = new Map(), messages = [], listeners = {};
-  class Element {
-    constructor(tag = 'div') { this.tagName = tag.toUpperCase(); this.value = ''; this.type = ''; this.checked = false; this.disabled = false; this.hidden = false; this.children = []; this.listeners = {}; this.options = []; this.selectedIndex = 0; this.style = {}; this.dataset = {}; this.classList = { add() {}, remove() {}, toggle() {} }; }
-    set textContent(value) { this._text = value; this.children = []; }
-    get textContent() { return this._text || ''; }
-    appendChild(child) { this.children.push(child); return child; }
-    append(...children) { this.children.push(...children); }
-    addEventListener(name, callback) { this.listeners[name] = callback; }
-    scrollIntoView() {} focus() {} setAttribute() {}
-  }
-  for (const match of html.matchAll(/<(input|select|textarea|button|div|form|section|datalist|details)[^>]*\bid="([^"]+)"[^>]*>/g)) {
-    const element = new Element(match[1]); element.type = /type="([^"]+)"/.exec(match[0])?.[1] || '';
-    element.value = /value="([^"]*)"/.exec(match[0])?.[1] || ''; elements.set(match[2], element);
-  }
-  for (const match of html.matchAll(/<select[^>]*id="([^"]+)"[^>]*>([\s\S]*?)<\/select>/g)) {
-    const element = elements.get(match[1]);
-    element.options = [...match[2].matchAll(/<option value="([^"]+)"/g)].map(m => ({ value: m[1], disabled: false })); element.value = element.options[0]?.value || '';
-  }
-  const document = { getElementById: id => { assert.ok(elements.has(id), 'Missing DOM id ' + id); return elements.get(id); }, createElement: tag => new Element(tag), querySelectorAll: () => [...elements.values()].filter(e => e.tagName === 'BUTTON') };
-  const sandbox = { document, window: { addEventListener: (name, callback) => { listeners[name] = callback; }, setTimeout: () => {} }, acquireVsCodeApi: () => ({ postMessage: message => messages.push(message), getState: () => ({}), setState() {} }), console };
-  vm.runInNewContext(/<script nonce="[^"]+">([\s\S]*?)<\/script>/.exec(html)[1], sandbox);
-  const fire = message => listeners.message({ data: message });
+  const { elements, messages, fire } = require('./sidebar-fixture').sidebarFixture(html, { activeTool: 'claude' });
+  fire({ type: 'busy', busy: false });
   const form = prefix => (name => elements.get(prefix + 'Proxy' + name));
   fire({ type: 'configEditor', providerId: 'existing', tool: 'claude', text: '{"env":{}}', hasKey: true, proxy: config({ timeoutMs: 5000 }) });
   check('existing Config form loads connection, preset and advanced overrides', () => { assert.equal(form('edit')('Mode').value, 'proxy'); assert.equal(form('edit')('timeoutMs').value, '5000'); });
@@ -334,13 +317,15 @@ function testUi() {
   check('Cancel restores proxy settings as well as config text', () => assert.equal(form('edit')('timeoutMs').value, '5000'));
   form('edit')('Reset').listeners.click();
   check('Restore preset defaults removes provider-specific overrides', () => assert.equal(form('edit')('timeoutMs').value, '300000'));
+  fire({ type: 'busy', busy: false });
   elements.get('providerName').value = 'New'; elements.get('baseUrl').value = 'https://upstream.invalid'; elements.get('apiKey').value = 'synthetic'; elements.get('modelSelect').value = 'model'; form('add')('Mode').value = 'proxy';
   elements.get('providerForm').listeners.submit({ preventDefault() {} });
   check('Add Provider form includes proxy settings with real upstream fields', () => { assert.equal(messages.at(-1).type, 'createProvider'); assert.equal(messages.at(-1).payload.proxy.mode, 'proxy'); assert.equal(messages.at(-1).payload.baseUrl, 'https://upstream.invalid'); });
   const provider = { id: 'existing', name: 'Existing', tool: 'claude', modelPolicy: { type: 'fixed', model: 'model' }, hasKey: true, proxy: config(), needsApply: true, proxyRuntime: { state: 'running', requests: 1, succeeded: 0, failed: 1, retries: 0, trimmedMessages: 0, lastRequest: { ok: false, status: 503, error: 'all nodes exhausted', durationMs: 5 } } };
   fire({ type: 'state', state: { providers: [provider], currentProviderIds: { claude: 'existing' }, apiStatuses: [], configPaths: {}, toolEnabled: { claude: true, codex: true }, storageSizes: {}, globalCliSync: true } });
   const allText = element => element.textContent + ' ' + element.children.map(allText).join(' ');
-  check('card separates local Running, upstream failure and Pending Apply', () => { const text = allText(elements.get('claudeProviders')); assert.match(text, /Proxy: Running/); assert.match(text, /Failed · HTTP 503/); assert.match(text, /Pending Apply/); });
+  check('card separates local Running, upstream failure and Pending Apply', () => { const text = allText(elements.get('claudeProviders')); assert.match(text, /兼容转发：运行中/); assert.match(text, /失败 · HTTP 503/); assert.match(text, /等待应用/); });
+  fire({ type: 'busy', busy: false }); elements.get('closeConfigButton').listeners.click(); elements.get('codexPageTab').listeners.click();
   fire({ type: 'configEditor', providerId: 'codex-existing', tool: 'codex', text: 'model_provider = "OpenAI"', hasKey: true,
     proxy: { mode: 'proxy', preset: 'custom', apiFormat: 'responses', overrides: { timeoutMs: 7000 } } });
   check('Codex Config displays the shared proxy controls and Responses defaults', () => {
@@ -348,6 +333,7 @@ function testUi() {
     assert.equal(form('edit')('messagesPath').value, '/v1/responses'); assert.equal(form('edit')('timeoutMs').value, '7000');
     assert.equal(form('edit')('maxThinkingBudget').disabled, true);
   });
+  fire({ type: 'busy', busy: false });
   form('edit')('timeoutMs').value = '8000'; elements.get('saveConfigButton').listeners.click();
   check('Codex Config Save carries its API format and advanced settings', () => {
     assert.equal(messages.at(-1).providerId, 'codex-existing'); assert.equal(messages.at(-1).proxy.apiFormat, 'responses'); assert.equal(messages.at(-1).proxy.overrides.timeoutMs, 8000);
@@ -363,36 +349,74 @@ function testUi() {
     { tool: 'claude', mode: 'api', providerName: 'CC source', model: 'cc-model', status: 'ready' },
     { tool: 'codex', mode: 'official', providerName: 'Official account', status: 'signedIn' }
   ], configPaths: {}, toolEnabled: { claude: true, codex: true }, storageSizes: {}, globalCliSync: true };
+  fire({ type: 'busy', busy: false });
   fire({ type: 'state', state: officialState });
   check('overview renders five columns with explicit official mode, client model default and Signed in', () => {
     assert.match(html, /class="statusHead">Tool/); assert.match(html, /class="statusHead">Mode/);
-    assert.equal(elements.get('statusRows').children.length, 10);
-    const text = allText(elements.get('statusRows')); assert.match(text, /Official account/); assert.match(text, /Client default/); assert.match(text, /Signed in/); assert.doesNotMatch(text, /NULL|Unactivated/);
+    assert.equal(elements.get('statusRows').children.length, 5);
+    const text = allText(elements.get('statusRows')); assert.match(text, /官方账号/); assert.match(text, /客户端默认/); assert.match(text, /已登录/); assert.doesNotMatch(text, /NULL|Unactivated/);
   });
   check('mode actions are buttons and the active official mode cannot accidentally clear its login', () => {
     assert.equal(elements.get('codexOfficialMode').tagName, 'BUTTON'); assert.equal(elements.get('codexApiMode').tagName, 'BUTTON');
-    assert.match(elements.get('codexCurrentMode').textContent, /Official account/); assert.equal(elements.get('codexOfficialMode').disabled, true); assert.equal(elements.get('codexApiMode').disabled, false);
+    assert.match(elements.get('codexCurrentMode').textContent, /官方账号/); assert.equal(elements.get('codexOfficialMode').disabled, true); assert.equal(elements.get('codexApiMode').disabled, false);
   });
   elements.get('codexApiMode').listeners.click();
-  check('API button sends an action without optimistically changing the displayed mode', () => { assert.equal(messages.at(-1).type, 'applyCodexMode'); assert.equal(messages.at(-1).mode, 'api'); assert.match(elements.get('codexCurrentMode').textContent, /Official account/); });
+  check('API button sends an action without optimistically changing the displayed mode', () => { assert.equal(messages.at(-1).type, 'applyCodexMode'); assert.equal(messages.at(-1).mode, 'api'); assert.match(elements.get('codexCurrentMode').textContent, /官方账号/); });
   fire({ type: 'state', state: { ...officialState, codexMode: 'api', currentProviderIds: { codex: apiSource.id }, apiStatuses: [{ tool: 'codex', mode: 'api', providerName: 'Saved API', model: 'api-model', status: 'ready' }] } });
+  fire({ type: 'busy', busy: false });
+  assert.equal(elements.get('codexOfficialMode').disabled, false);
   elements.get('codexOfficialMode').listeners.click();
-  check('confirmed API state updates the mode display and enables the official action', () => { assert.equal(elements.get('codexCurrentMode').textContent, 'Current mode: API'); assert.equal(elements.get('codexOfficialMode').disabled, false); assert.equal(messages.at(-1).mode, 'official'); });
+  check('confirmed API state enables Official and submission locks it until acknowledgement', () => { assert.match(elements.get('codexCurrentMode').textContent, /API/); assert.equal(elements.get('codexOfficialMode').disabled, true); assert.equal(messages.at(-1).mode, 'official'); });
   fire({ type: 'state', state: { ...officialState, apiStatuses: [{ tool: 'codex', mode: 'official', status: 'loginRequired' }], toolEnabled: { claude: true, codex: false } } });
-  check('login-required state is explicit and disabling Codex locks both mode actions', () => { assert.match(elements.get('codexModeDetail').textContent, /Sign in/); assert.equal(elements.get('codexOfficialMode').disabled, true); assert.equal(elements.get('codexApiMode').disabled, true); });
+  check('login-required state is explicit and disabling Codex locks both mode actions', () => { assert.match(elements.get('codexModeDetail').textContent, /登录|sign-in/); assert.equal(elements.get('codexOfficialMode').disabled, true); assert.equal(elements.get('codexApiMode').disabled, true); });
+  fire({ type: 'busy', busy: false });
+  fire({ type: 'state', state: { ...officialState, sessions: { runtimeHome: '/synthetic/.codex', identities: [], sessions: [], attached: false } } });
+  check('unmanaged mode points to storage and no longer renders a duplicate history browser', () => {
+    assert.match(elements.get('sessionStorage').textContent, /synthetic/);
+    assert.match(elements.get('codexModeNext').textContent, /数据与存储|Data & storage/);
+    assert.equal(elements.has('sessionList'), false); assert.equal(elements.has('sessionSearch'), false);
+    assert.equal(elements.get('addIdentityButton').disabled, true);
+  });
+  const managed = { root: '/synthetic/library', attached: true, activeId: 'official-a', identities: [
+    { id: 'official-a', name: 'Account A', kind: 'official' }, { id: 'api-library', name: 'API history', kind: 'api' }
+  ], sessions: [] };
+  fire({ type: 'state', state: { ...officialState, sessions: managed } });
+  check('official account section is separate and API Providers are read-only in Official mode', () => {
+    assert.match(allText(elements.get('officialAccountsList')), /Account A/);
+    assert.equal(elements.get('codexProviders').querySelectorAll('[data-provider-id]')[0].children.at(-1).children[0].disabled, true);
+    assert.equal(elements.get('saveButton').disabled, true);
+    assert.equal(elements.get('reloadIdentityButton').hidden, true);
+  });
+  fire({ type: 'state', state: { ...officialState, sessions: { ...managed, activeId: 'api-library', restartRequired: true } } });
+  check('pending reload locks mode and Provider actions and exposes Reload', () => {
+    assert.match(elements.get('codexCurrentMode').textContent, /待重载|reload required/);
+    assert.equal(elements.get('codexApiMode').disabled, true); assert.equal(elements.get('codexOfficialMode').disabled, true);
+    assert.equal(elements.get('reloadIdentityButton').hidden, false);
+    assert.equal(elements.get('codexProviders').querySelectorAll('[data-provider-id]')[0].children.at(-1).children[0].disabled, true);
+    elements.get('reloadIdentityButton').listeners.click(); assert.equal(messages.at(-1).action, 'reload');
+  });
+  fire({ type: 'busy', busy: false });
+  fire({ type: 'state', state: { ...officialState, codexMode: 'api', sessions: { ...managed, activeId: 'api-library' } } });
+  check('API mode unlocks API actions and makes official account actions read-only', () => {
+    assert.match(elements.get('codexCurrentMode').className, /api/);
+    assert.equal(elements.get('codexApiMode').disabled, true); assert.equal(elements.get('codexOfficialMode').disabled, false);
+    assert.equal(elements.get('addIdentityButton').disabled, true);
+    assert.equal(elements.get('codexProviders').querySelectorAll('[data-provider-id]')[0].children.at(-1).children[0].disabled, false);
+    assert.equal(elements.get('codexAddProviderDetails').hidden, false);
+    assert.equal(elements.get('providerForm').parentElement, elements.get('codexAddProviderBody'));
+  });
   const networkButton = name => elements.get(name + 'NetworkProxyButton');
-  const proxyConfig = { url: 'http://127.0.0.1:12000', noProxy: 'localhost,127.0.0.1,::1', claude: true, codex: true };
-  const networkState = config => ({ ...officialState, networkProxy: { config, message: config ? 'Restart clients' : 'Original settings restored' } });
+  const proxyConfig = { url: 'http://127.0.0.1:12000', noProxy: 'localhost,127.0.0.1,::1', claude: false, codex: true };
+  const networkState = config => ({ ...officialState, networkProxy: { tools: { codex: { config, managed: true, message: config ? 'Restart clients' : 'Original settings restored' } } } });
   fire({ type: 'state', state: networkState(undefined) });
   check('network proxy Off has an explicit badge and a disabled current-state action', () => {
-    assert.match(elements.get('networkProxyBadge').textContent, /已停用.*Disabled/);
+    assert.match(elements.get('networkProxyBadge').textContent, /未管理代理/);
     assert.equal(networkButton('apply').disabled, false); assert.equal(networkButton('restore').disabled, true);
-    assert.match(networkButton('apply').textContent, /启用代理.*Enable/);
+    assert.match(networkButton('apply').textContent, /启用代理/);
     assert.equal(networkButton('apply').className, 'primary');
     const count = messages.length; networkButton('restore').listeners.click(); assert.equal(messages.length, count);
   });
   elements.get('networkProxyUrl').value = proxyConfig.url;
-  elements.get('networkProxyClaude').checked = true; elements.get('networkProxyCodex').checked = true;
   elements.get('networkProxyUrl').listeners.input();
   networkButton('test').listeners.click();
   check('network proxy test sends its own settings without changing a provider', () => {
@@ -408,25 +432,25 @@ function testUi() {
   });
   fire({ type: 'busy', busy: false });
   networkButton('apply').listeners.click();
-  check('network proxy Apply targets both clients and does not optimistically report chat success', () => {
-    assert.equal(messages.at(-1).type, 'applyNetworkProxy'); assert.equal(messages.at(-1).config.claude, true);
-    assert.equal(messages.at(-1).config.codex, true); assert.match(elements.get('networkProxyBadge').textContent, /Disabled/);
+  check('network proxy Apply targets the active Codex page only and does not optimistically report chat success', () => {
+    assert.equal(messages.at(-1).type, 'applyNetworkProxy'); assert.equal(messages.at(-1).config.claude, false); assert.equal(messages.at(-1).tool, 'codex');
+    assert.equal(messages.at(-1).config.codex, true); assert.match(elements.get('networkProxyBadge').textContent, /未管理代理/);
     assert.match(networkButton('apply').textContent, /应用中/);
     const count = messages.length; networkButton('apply').listeners.click(); assert.equal(messages.length, count);
   });
-  const enabledState = { ...officialState, networkProxy: { config: proxyConfig,
-    message: 'Restart clients', test: { checkedAt: 'fixture time', proxyUrl: proxyConfig.url, results: [{ target: 'https://fixture.invalid', reachable: true, status: 401 }] } } };
+  const enabledState = { ...officialState, networkProxy: { tools: { codex: { config: proxyConfig, managed: true,
+    message: 'Restart clients', test: { checkedAt: 'fixture time', proxyUrl: proxyConfig.url, results: [{ target: 'https://fixture.invalid', reachable: true, status: 401 }] } } } } };
   fire({ type: 'state', state: enabledState }); fire({ type: 'busy', busy: false });
   check('network proxy display separates enabled configuration, transport reachability and chat verification', () => {
-    assert.match(elements.get('networkProxyStatus').textContent, /Enabled.*Restart/);
-    assert.match(elements.get('networkProxyTest').textContent, /HTTP 401/); assert.match(elements.get('networkProxyTest').textContent, /chat not verified/);
+    assert.match(elements.get('networkProxyStatus').textContent, /代理配置.*Restart/);
+    assert.match(elements.get('networkProxyTest').textContent, /HTTP 401/); assert.match(elements.get('networkProxyTest').textContent, /未验证登录或聊天/);
     assert.equal(networkButton('restore').disabled, false);
   });
   check('enabled proxy badge and checked current button make the confirmed state visible', () => {
-    assert.match(elements.get('networkProxyBadge').textContent, /已启用.*Enabled/);
+    assert.match(elements.get('networkProxyBadge').textContent, /已配置代理/);
     assert.match(elements.get('networkProxyBadge').className, /enabled/);
     assert.equal(networkButton('apply').disabled, true);
-    assert.match(networkButton('apply').textContent, /✓ 已启用/);
+    assert.match(networkButton('apply').textContent, /已配置代理|已启用/);
     assert.equal(networkButton('apply').className, 'networkProxyCurrent');
     const count = messages.length; networkButton('apply').listeners.click(); assert.equal(messages.length, count);
   });
@@ -434,8 +458,8 @@ function testUi() {
   check('editing an enabled proxy exposes Apply changes while the active badge stays enabled', () => {
     assert.equal(networkButton('apply').disabled, false); assert.match(networkButton('apply').textContent, /应用更改/);
     assert.equal(networkButton('apply').className, 'primary');
-    assert.match(elements.get('networkProxyStatus').textContent, /更改待应用/);
-    assert.match(elements.get('networkProxyBadge').textContent, /Enabled/);
+    assert.match(elements.get('networkProxyStatus').textContent, /有更改待应用/);
+    assert.match(elements.get('networkProxyBadge').textContent, /已配置代理|已启用/);
   });
   elements.get('networkProxyUrl').value = proxyConfig.url; elements.get('networkProxyUrl').listeners.input();
   check('reverting a draft disables redundant Apply again', () => assert.equal(networkButton('apply').disabled, true));
@@ -443,43 +467,69 @@ function testUi() {
   elements.get('networkProxyBypass').value = '::1, localhost,127.0.0.1,localhost'; elements.get('networkProxyBypass').listeners.input();
   check('URL trailing slash and bypass order or duplicates do not trigger a redundant Apply', () => assert.equal(networkButton('apply').disabled, true));
   elements.get('networkProxyUrl').value = proxyConfig.url; elements.get('networkProxyBypass').value = proxyConfig.noProxy;
-  elements.get('networkProxyCodex').checked = false; elements.get('networkProxyCodex').listeners.input();
-  check('changing client selection enables Apply changes', () => assert.equal(networkButton('apply').disabled, false));
+  elements.get('networkProxyUrl').value = 'http://127.0.0.1:12002'; elements.get('networkProxyUrl').listeners.input();
+  check('editing the active tool proxy enables Apply changes', () => assert.equal(networkButton('apply').disabled, false));
   fire({ type: 'state', state: enabledState });
-  check('background state refresh preserves an unapplied draft', () => assert.equal(elements.get('networkProxyCodex').checked, false));
+  check('background state refresh preserves an unapplied draft', () => assert.equal(elements.get('networkProxyUrl').value, 'http://127.0.0.1:12002'));
   networkButton('apply').listeners.click();
   fire({ type: 'error', action: 'applyNetworkProxy', message: 'Synthetic failure' });
   fire({ type: 'busy', busy: false });
   check('failed Apply preserves the draft and confirmed state, then unlocks retry', () => {
-    assert.equal(elements.get('networkProxyCodex').checked, false);
+    assert.equal(elements.get('networkProxyUrl').value, 'http://127.0.0.1:12002');
     assert.equal(networkButton('apply').disabled, false); assert.equal(elements.get('networkProxyUrl').disabled, false);
-    assert.match(elements.get('networkProxyBadge').textContent, /Enabled/);
-    assert.match(networkButton('apply').textContent, /Apply changes/);
+    assert.match(elements.get('networkProxyBadge').textContent, /已配置代理|已启用/);
+    assert.match(networkButton('apply').textContent, /应用更改/);
   });
   networkButton('apply').listeners.click();
-  fire({ type: 'state', state: networkState({ ...proxyConfig, codex: false }) });
+  fire({ type: 'state', state: networkState({ ...proxyConfig, url: 'http://127.0.0.1:12002' }) });
   fire({ type: 'busy', busy: false });
   check('successful changed Apply confirms settings and disables the current action', () => {
-    assert.equal(elements.get('networkProxyCodex').checked, false); assert.equal(networkButton('apply').disabled, true);
+    assert.equal(elements.get('networkProxyUrl').value, 'http://127.0.0.1:12002'); assert.equal(networkButton('apply').disabled, true);
   });
   networkButton('restore').listeners.click();
   check('network proxy Restore is independent from API compatibility proxy controls', () => assert.equal(messages.at(-1).type, 'restoreNetworkProxy'));
   check('Restore immediately locks repeated actions without prematurely showing disabled', () => {
     assert.match(networkButton('restore').textContent, /停用中/); assert.equal(networkButton('restore').disabled, true);
-    assert.match(elements.get('networkProxyBadge').textContent, /Enabled/);
+    assert.match(elements.get('networkProxyBadge').textContent, /已配置代理|已启用/);
     const count = messages.length; networkButton('restore').listeners.click(); assert.equal(messages.length, count);
   });
   fire({ type: 'error', action: 'restoreNetworkProxy', message: 'Synthetic restore failure' }); fire({ type: 'busy', busy: false });
   check('failed Restore keeps Enabled visible and allows retry', () => {
-    assert.match(elements.get('networkProxyBadge').textContent, /Enabled/); assert.equal(networkButton('restore').disabled, false);
+    assert.match(elements.get('networkProxyBadge').textContent, /已配置代理|已启用/); assert.equal(networkButton('restore').disabled, false);
   });
   networkButton('restore').listeners.click();
   fire({ type: 'state', state: networkState(undefined) }); fire({ type: 'busy', busy: false });
   check('confirmed Restore marks Disabled and blocks repeated Restore after busy clears', () => {
-    assert.match(elements.get('networkProxyBadge').textContent, /Disabled/);
+    assert.match(elements.get('networkProxyBadge').textContent, /未管理代理/);
     assert.equal(networkButton('restore').disabled, true); assert.equal(networkButton('apply').disabled, false);
     const count = messages.length; networkButton('restore').listeners.click(); assert.equal(messages.length, count);
   });
+  elements.get('closeConfigButton').listeners.click();
+  const splitState = { ...officialState, networkProxy: { tools: { codex: { config: proxyConfig }, claude: { config: { ...proxyConfig, claude: true, codex: false, url: 'http://127.0.0.1:13000' } } } } };
+  fire({ type: 'state', state: splitState });
+  elements.get('networkProxyUrl').value = 'http://127.0.0.1:14000'; elements.get('networkProxyUrl').listeners.input();
+  elements.get('claudePageTab').listeners.click();
+  check('Claude page hides Codex and loads its own proxy without applying it', () => {
+    assert.equal(elements.get('codexSection').hidden, true); assert.equal(elements.get('claudeSection').hidden, false);
+    assert.equal(elements.get('networkProxyUrl').value, 'http://127.0.0.1:13000'); assert.equal(elements.get('tool').value, 'claude');
+    assert.equal(elements.get('codexSessionControls').hidden, true); assert.equal(elements.get('claudeSessionsLater').hidden, false);
+  });
+  elements.get('copyNetworkSettingsButton').listeners.click();
+  check('explicit copy sends clipboard data without changing the other tool or draft', () => { assert.equal(elements.get('networkProxyUrl').value, 'http://127.0.0.1:13000'); assert.equal(messages.at(-1).type, 'networkClipboard'); assert.equal(messages.at(-1).action, 'copy'); });
+  fire({ type: 'busy', busy: false });
+  elements.get('codexPageTab').listeners.click();
+  check('returning to Codex preserves its own unapplied draft', () => {
+    assert.equal(elements.get('networkProxyUrl').value, 'http://127.0.0.1:14000'); assert.equal(elements.get('claudeSection').hidden, true);
+  });
+  fire({ type: 'state', state: { ...networkState(undefined), sessions: { root: '/data/codex', attached: true, activeId: 'account-a', identities: [
+    { id: 'account-a', name: 'A', kind: 'official' }, { id: 'account-b', name: 'B', kind: 'official' }
+  ], sessions: [] } } });
+  const accountB = elements.get('officialAccountsList').children[1]; accountB.children[1].children[0].listeners.click();
+  check('account Use sends an explicit switch rather than selecting a history preview', () => {
+    assert.equal(messages.at(-1).type, 'sessionAction'); assert.equal(messages.at(-1).action, 'switch'); assert.equal(messages.at(-1).identityId, 'account-b');
+  });
+  fire({ type: 'busy', busy: false });
+  fire({ type: 'state', state: networkState(undefined) });
   fire({ type: 'busy', busy: true }); fire({ type: 'busy', busy: false });
   check('unrelated busy transitions retain state-specific button locks', () => assert.equal(networkButton('restore').disabled, true));
 
@@ -510,12 +560,12 @@ async function testCodexApplication(base, offered) {
     });
     await request(endpoint);
     check('Codex Save/Verify leaves the applied route and key snapshot intact', () => { assert.equal(offered().at(-1).payload.temperature, undefined); assert.equal(offered().at(-1).headers.authorization, 'Bearer synthetic-secret-codex'); });
-    const before = ctx.workspaceState.get('vscodemodelswitch.appliedCodexProxy'), beforeWrites = writes;
-    ctx.workspaceState.failOnceKey = 'vscodemodelswitch.appliedRevisions';
+    const before = ctx.workspaceState.get(app.environment.key('vscodemodelswitch.appliedCodexProxy')), beforeWrites = writes;
+    ctx.globalState.failOnceKey = app.environment.key('vscodemodelswitch.appliedRevisions');
     await assert.rejects(() => app.applyProviderFromSidebar(provider.id), /metadata write failure/);
     failWrite = true; await assert.rejects(() => app.applyProviderFromSidebar(provider.id), /configuration write failure/); failWrite = false;
     await request(endpoint);
-    check('Codex failed Apply rolls back route, key and per-tool metadata', () => { assert.equal(writes, beforeWrites); assert.deepEqual(ctx.workspaceState.get('vscodemodelswitch.appliedCodexProxy'), before); assert.equal(offered().at(-1).headers.authorization, 'Bearer synthetic-secret-codex'); });
+    check('Codex failed Apply rolls back route, key and per-tool metadata', () => { assert.equal(writes, beforeWrites); assert.deepEqual(ctx.workspaceState.get(app.environment.key('vscodemodelswitch.appliedCodexProxy')), before); assert.equal(offered().at(-1).headers.authorization, 'Bearer synthetic-secret-codex'); });
     app.dispose();
     reloaded = new VSModelSwitchApp({ ...context(ctx.globalState, ctx.workspaceState), secrets: ctx.secrets });
     await new Promise(resolve => setTimeout(resolve, 30));
@@ -532,8 +582,9 @@ async function testCodexApplication(base, offered) {
     check('Codex stop/start resumes the applied settings rather than pending edits', () => assert.equal(offered().at(-1).payload.temperature, undefined));
     await reloaded.applyProviderFromSidebar(provider.id); await request(appliedCodex);
     check('Codex Apply activates saved headers/parameters/key and clears pending changes', () => { assert.equal(offered().at(-1).payload.temperature, 0.4); assert.equal(offered().at(-1).headers.authorization, 'Bearer synthetic-secret-codex-new'); });
+    reloaded.sessionController.state = async () => ({ root: '/synthetic-managed-library', identities: [{ id: 'official', kind: 'official' }], activeId: 'official', attached: true });
     await reloaded.applyCodexModeFromSidebar('official');
-    check('Official mode stops Codex proxy recovery without clearing Claude proxy state', () => { assert.equal(ctx.workspaceState.get('vscodemodelswitch.appliedCodexProxy'), undefined); assert.ok(ctx.workspaceState.get('vscodemodelswitch.appliedProxy')); assert.equal(reloaded.proxyServer.runtime(provider.id).state, 'stopped'); });
+    check('Official mode stops Codex proxy recovery without clearing Claude proxy state', () => { assert.equal(ctx.workspaceState.get(app.environment.key('vscodemodelswitch.appliedCodexProxy')), undefined); assert.ok(ctx.workspaceState.get(app.environment.key('vscodemodelswitch.appliedProxy'))); assert.equal(reloaded.proxyServer.runtime(provider.id).state, 'stopped'); });
     state = await reloaded.getSidebarState();
     check('official mode needs no saved provider and reports a usable mode rather than NULL/unactivated', () => {
       const row = state.apiStatuses.find(item => item.tool === 'codex');
@@ -542,6 +593,7 @@ async function testCodexApplication(base, offered) {
     appliedCodex = { mode: 'official', officialLoggedIn: true };
     await reloaded.reloadStateFromSidebar(); state = await reloaded.getSidebarState();
     check('official authenticated account reports Signed in independently of API sources', () => assert.equal(state.apiStatuses.find(item => item.tool === 'codex').status, 'signedIn'));
+    reloaded.sessionController.state = async () => ({ root: '/synthetic-managed-library', identities: [{ id: 'api', kind: 'api' }], activeId: 'api', attached: true });
     await reloaded.applyCodexModeFromSidebar('api');
     state = await reloaded.getSidebarState();
     check('Apply API finds a saved source when no provider was active in official mode', () => { assert.equal(state.codexMode, 'api'); assert.equal(state.currentProviderIds.codex, provider.id); });

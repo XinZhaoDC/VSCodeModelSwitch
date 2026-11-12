@@ -26,17 +26,17 @@ export class StatusBarController implements vscode.Disposable {
 
   private updateItem(item: vscode.StatusBarItem, label: string, state: ToolRuntimeState): void {
     const official = state.mode === 'official';
-    const provider = official ? 'Official account' : state.providerName ?? shortUrl(state.baseUrl) ?? 'Not configured';
-    const model = state.model ?? (official ? 'Client default' : 'Not configured');
+    const provider = official ? '官方账号' : state.providerName ?? shortUrl(state.baseUrl) ?? '尚未配置';
+    const model = state.model ?? (official ? '客户端默认' : '尚未配置');
     item.text = `$(plug) ${label}: ${provider} / ${model}`;
     item.tooltip = [
-      `VSCodeModelSwitch ${label}`,
-      `Provider: ${provider}`,
-      `Mode: ${official ? 'Official account' : state.mode === 'api' || state.baseUrl ? 'API' : 'Unknown'}`,
-      `Model: ${model}`,
+      `AgentDeck · ${label}`,
+      `供应商：${provider}`,
+      `登录方式：${official ? '官方账号' : state.mode === 'api' || state.baseUrl ? 'API' : '未知'}`,
+      `模型：${model}`,
       state.baseUrl ? `URL: ${state.baseUrl}` : undefined,
-      `Config: ${state.configPath}`,
-      state.matchedProviderId ? 'Source: matched saved provider' : 'Source: config file'
+      `配置位置：${state.configPath}`,
+      state.matchedProviderId ? '来源：匹配已保存的供应商' : '来源：当前配置文件'
     ]
       .filter(Boolean)
       .join('\n');
